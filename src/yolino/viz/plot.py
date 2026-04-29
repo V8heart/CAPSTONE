@@ -621,12 +621,28 @@ def plot_style_grid(lines, name, image, coords: VariableStructure = None, show_g
             grid_images.append(convert_to_torch_image(line_img))
 
     if gt is not None:
+        overlay_img, ok = plot(lines, name="", image=image, coords=coords, show_grid=show_grid,
+                               cell_size=cell_size,
+                               threshold=threshold, show_color_bar=show_color_bar,
+                               coordinates=coordinates, epoch=epoch,
+                               tag=tag, imageidx=imageidx, colorstyle=ColorStyle.ORIENTATION,
+                               training_vars_only=training_vars_only,
+                               anchors=anchors, level=level + 1, thickness=thickness)
+        overlay_img, ok = plot(gt, name="", image=overlay_img, coords=coords, show_grid=show_grid,
+                               cell_size=cell_size,
+                               show_color_bar=show_color_bar, coordinates=coordinates, epoch=epoch,
+                               tag=tag, imageidx=imageidx, colorstyle=ColorStyle.UNIFORM,
+                               color=(255, 255, 255), anchors=anchors, level=level + 1, thickness=thickness)
+        overlay_img = cv2.rectangle(img=overlay_img, pt1=(0, 0), pt2=(200, 25), color=(255, 255, 255), thickness=-1)
+        overlay_img = cv2.putText(img=overlay_img, text="pred + gt", org=(5, 20), color=(0, 0, 0),
+                                  fontFace=cv2.FONT_HERSHEY_PLAIN, fontScale=1, thickness=1)
+        grid_images.append(convert_to_torch_image(overlay_img))
+
         line_img, ok = plot(gt, name="", image=image, coords=coords, show_grid=show_grid,
                             cell_size=cell_size,
                             show_color_bar=show_color_bar, coordinates=coordinates, epoch=epoch,
-                            tag=tag, imageidx=imageidx,
-                            colorstyle=ColorStyle.CLASS
-                            if Variables.CLASS in coords.train_vars() else ColorStyle.ORIENTATION,
+                            tag=tag, imageidx=imageidx, colorstyle=ColorStyle.UNIFORM,
+                            color=(255, 255, 255),
                             anchors=anchors, level=level + 1, thickness=thickness)
         line_img = cv2.rectangle(img=line_img, pt1=(0, 0), pt2=(200, 25), color=(255, 255, 255), thickness=-1)
         line_img = cv2.putText(img=line_img, text="ground truth", org=(5, 20), color=(0, 0, 0),
@@ -636,6 +652,8 @@ def plot_style_grid(lines, name, image, coords: VariableStructure = None, show_g
 
     expected_num_images = (len(styles) + 1 - int(Variables.CLASS not in coords.train_vars()) - int(
         Variables.CONF not in coords.train_vars()) - int(gt is None))
+    if gt is not None:
+        expected_num_images += 1
     return len(grid_images) == expected_num_images
 
 

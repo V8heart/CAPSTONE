@@ -65,9 +65,14 @@ class CellMatcher(Matcher):
                 raise re
             return preds, grid_tensor
 
-        matched_predictions, _ = self.match(preds=preds, grid_tensor=grid_tensor, filenames=filenames,
-                                            confidence_threshold=self.args.confidence)
-        resorted_grid_tensor = self.__resort_by_match_ids__(grid_tensor, matched_predictions)
+        if not getattr(self.args, "loss_hard_matching", True):
+            # Phase 1C ablation: disable Hungarian matching and keep predictor order.
+            Log.info("Loss matching mode: identity (loss_hard_matching=false).")
+            resorted_grid_tensor = grid_tensor
+        else:
+            matched_predictions, _ = self.match(preds=preds, grid_tensor=grid_tensor, filenames=filenames,
+                                                confidence_threshold=self.args.confidence)
+            resorted_grid_tensor = self.__resort_by_match_ids__(grid_tensor, matched_predictions)
 
         self._debug_full_match_plot_(epoch, preds, resorted_grid_tensor, filenames, CoordinateSystem.CELL_SPLIT,
                                      tag=tag)

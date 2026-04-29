@@ -534,13 +534,13 @@ class Grid:
                         if is_training_data and Variables.GEOMETRY in coords.train_vars():
                             val[coords.get_position_within_prediction(Variables.GEOMETRY)] = [
                                 round(v + predictor.start[0] * scale[0]),
-                                round(h + predictor.start[1] * scale[0]),
+                                round(h + predictor.start[1] * scale[1]),
                                 round(v + predictor.end[0] * scale[0]),
                                 round(h + predictor.end[1] * scale[1])]
                         elif not is_training_data:
                             val[coords.get_position_of(Variables.GEOMETRY)] = [
                                 round(v + predictor.start[0] * scale[0]),
-                                round(h + predictor.start[1] * scale[0]),
+                                round(h + predictor.start[1] * scale[1]),
                                 round(v + predictor.end[0] * scale[0]),
                                 round(h + predictor.end[1] * scale[1])]
 

@@ -95,14 +95,17 @@ class Evaluator:
     def __call__(self, images, grid_tensor, idx, filenames, epoch, num_duplicates, tag="dummy_eval", do_in_uv=True,
                  apply_nms=False, fit_line=False):
 
-        preds = self.forward(images, epoch=epoch, is_train=False)
-        preds = preds.detach()
+        geom_preds, embed_preds = self.forward(images, epoch=epoch, is_train=False)
+        geom_preds = geom_preds.detach()
+        embed_preds = embed_preds.detach()
+        Log.debug("Evaluator forward output shapes geom=%s embed=%s" % (tuple(geom_preds.shape), tuple(embed_preds.shape)))
         if self.args.gpu:
-            preds = preds.cpu()
+            geom_preds = geom_preds.cpu()
+            embed_preds = embed_preds.cpu()
 
         if self.plot:
-            for i in range(len(preds)):
-                pred_grid, _ = GridFactory.get(torch.unsqueeze(preds[i].detach().cpu(), dim=0), [],
+            for i in range(len(geom_preds)):
+                pred_grid, _ = GridFactory.get(torch.unsqueeze(geom_preds[i].detach().cpu(), dim=0), [],
                                                CoordinateSystem.CELL_SPLIT, self.args,
                                                input_coords=self.coords,
                                                only_train_vars=True, anchors=self.anchors)
@@ -131,12 +134,12 @@ class Evaluator:
         if do_in_uv:
             Log.debug("Run evaluation on full UV")
             try:
-                preds_uv, gt_uv = self.prepare_uv(preds=preds, grid_tensors=grid_tensor, filenames=filenames,
+                preds_uv, gt_uv = self.prepare_uv(preds=geom_preds, grid_tensors=grid_tensor, filenames=filenames,
                                                   images=images)
             except ValueError as ex:
                 if epoch <= 5:
                     Log.error(str(ex))
-                    return preds, None
+                    return geom_preds, None
                 else:
                     raise ex
             uv_conversion = timeit.default_timer()
@@ -146,13 +149,13 @@ class Evaluator:
 
             # NMS
             if apply_nms:
-                preds = self.get_nms_results(filenames, gt_uv, epoch, images, preds_uv, tag)
+                geom_preds = self.get_nms_results(filenames, gt_uv, epoch, images, preds_uv, tag)
 
             start = timeit.default_timer()
             if fit_line:
                 fitted_lines = []
                 for i in range(len(preds_uv)):
-                    lines = fit_lines(lines_uv=preds[[i]], coords=self.coords,
+                    lines = fit_lines(lines_uv=geom_preds[[i]], coords=self.coords,
                                       confidence_threshold=self.args.confidence,
                                       adjacency_threshold=self.args.adjacency_threshold,
                                       grid_shape=self.args.grid_shape,
@@ -162,11 +165,11 @@ class Evaluator:
                     fitted_lines.append(lines)
             Log.time(key="fit_lines", value=timeit.default_timer() - start)
         else:
-            self.get_scores_in_cell(grid_tensor, preds, self.forward.start_epoch, filenames,
+            self.get_scores_in_cell(grid_tensor, geom_preds, self.forward.start_epoch, filenames,
                                     num_duplicates=num_duplicates, tag=tag,
                                     do_matching=self.args.anchors == AnchorDistribution.NONE)
 
-        return preds, fitted_lines
+        return geom_preds, fitted_lines
 
     def get_nms_results(self, filenames, gt_uv, epoch, images, preds_uv, tag, num_duplicates):
         set = []

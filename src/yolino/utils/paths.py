@@ -63,8 +63,9 @@ class Paths:
 
         self.train_configuration = self.experiment_dir.joinpath('train_configuration.txt')
 
+        checkpoint_top_folder = os.path.join(self.experiment_dir, "checkpoints")
+
         if explicit_model is None:
-            checkpoint_top_folder = os.path.join(self.experiment_dir, "checkpoints")
             self.cleanup_checkpoints(checkpoint_top_folder)
 
             self.checkpoints = Path(os.path.join(checkpoint_top_folder, id))
@@ -75,17 +76,23 @@ class Paths:
             self.model = Path(os.path.join(self.checkpoints, "model.pth"))
             self.pretrain_model = self.model
         else:
-            self.checkpoints = Path(os.path.dirname(explicit_model))
+            # Load FROM: the directory of the specified checkpoint file
             self.pretrain_checkpoints = Path(os.path.dirname(explicit_model))
-            self.model = Path(explicit_model)
             self.pretrain_model = Path(explicit_model)
+
+            # Save TO: a new directory under the current run id
+            # This prevents new weights from overwriting the source checkpoint
+            self.checkpoints = Path(os.path.join(checkpoint_top_folder, id))
+            if keep_checkpoints:
+                self.create_dir(self.checkpoints)
+            self.model = Path(os.path.join(self.checkpoints, "model.pth"))
 
         self.best_model = Path(os.path.join(self.checkpoints, "best_model.pth"))
         self.torch_script = Path(os.path.join(self.checkpoints, "best_model.pt"))
         self.train_config = Path(os.path.join(self.checkpoints, "train_configuration.txt"))
 
         self.pretrain_best_model = Path(os.path.join(self.pretrain_checkpoints, "best_model.pth"))
-        self.torch_script = Path(os.path.join(self.pretrain_checkpoints, "best_model.pt"))
+        self.pretrain_torch_script = Path(os.path.join(self.pretrain_checkpoints, "best_model.pt"))
         self.pretrain_train_config = Path(os.path.join(self.pretrain_checkpoints, "train_configuration.txt"))
 
         self.specs_folder = os.path.join(dvc, "specs")

@@ -234,6 +234,41 @@ class BinaryCrossEntropyCellLoss(AbstractLoss):
         return self.__apply_function__(preds, grid_tensor, p_unmatched, gt_unmatched, tag=tag, epoch=epoch)
 
 
+class FocalConfidenceLoss(AbstractLoss):
+    """Binary focal loss on confidence probabilities (after sigmoid activation)."""
+
+    def __init__(self, coords: VariableStructure, gpu, cuda, variable: Variables, conf_match_weight,
+                 activation_is_exp, loss_weight_strategy, gamma=2.0, alpha=0.25):
+        class focal_loss_fct:
+            def __init__(self, gamma, alpha):
+                self.gamma = float(gamma)
+                self.alpha = float(alpha)
+                self.reduction = "mean"
+
+            def __call__(self, preds, gts):
+                # preds are confidence probabilities (sigmoid already applied in model activations)
+                preds = torch.clamp(preds, min=1e-6, max=1 - 1e-6)
+                gts = torch.clamp(gts, min=0.0, max=1.0)
+                ce = -(gts * torch.log(preds) + (1 - gts) * torch.log(1 - preds))
+                pt = torch.where(gts > 0.5, preds, 1 - preds)
+                alpha_t = torch.where(gts > 0.5,
+                                      torch.full_like(gts, self.alpha),
+                                      torch.full_like(gts, 1.0 - self.alpha))
+                return (alpha_t * ((1 - pt) ** self.gamma) * ce).mean()
+
+            def cuda(self):
+                return self
+
+        super().__init__(coords=coords, gpu=gpu, cuda=cuda, one_hot=True, variable=variable,
+                         function=focal_loss_fct(gamma=gamma, alpha=alpha),
+                         conf_match_weight=conf_match_weight, reduction="mean",
+                         activation_is_exp=activation_is_exp, loss_weight_strategy=loss_weight_strategy)
+
+    def __call__(self, preds, grid_tensor, tag="none", epoch=None):
+        preds, grid_tensor, p_unmatched, gt_unmatched = super().__call__(preds, grid_tensor)
+        return self.__apply_function__(preds, grid_tensor, p_unmatched, gt_unmatched, tag=tag, epoch=epoch)
+
+
 class MeanSquaredErrorLoss(AbstractLoss):
     def __init__(self, reduction, coords: VariableStructure, gpu, cuda, variable: Variables, batch_size: int,
                  conf_match_weight, activation_is_exp, loss_weight_strategy) -> None:
@@ -250,8 +285,234 @@ class MeanSquaredErrorLoss(AbstractLoss):
     def __str__(self):
         string = super().__str__()
         return self.function.reduction.capitalize() + string
+####################################################################################################################################
+class TangentCosineLoss(AbstractLoss):
+    def __init__(self, coords: VariableStructure, gpu, cuda, variable: Variables, conf_match_weight, activation_is_exp,
+                 loss_weight_strategy, reduction="mean") -> None:
+        if variable != Variables.GEOMETRY:
+            raise NotImplementedError("Tangent loss is only applicable to geometry.")
 
+        class tangent_loss_fct:
+            def __init__(self, reduction):
+                self.reduction = reduction
 
+            def __call__(self, preds, gts):
+                # 1. 예측 선분(preds)과 정답 선분(gts)에서 각각 방향 벡터 추출
+                # (주의: coords.py에 정의된 방식에 따라 x, y 좌표 인덱싱 필요)
+                pred_vec = preds[:, 2:4] - preds[:, 0:2] # 예시: (x2, y2) - (x1, y1)
+                gt_vec = gts[:, 2:4] - gts[:, 0:2]
+
+                # 2. 벡터 정규화 (크기를 1로 만듦)
+                pred_vec_norm = torch.nn.functional.normalize(pred_vec, p=2, dim=1)
+                gt_vec_norm = torch.nn.functional.normalize(gt_vec, p=2, dim=1)
+
+                # 3. 코사인 유사도 계산
+                # 방향이 완벽히 같으면 1, 정반대면 -1, 직교하면 0
+                cos_sim = torch.sum(pred_vec_norm * gt_vec_norm, dim=1)
+
+                # 4. Loss 계산: 1에서 코사인 유사도를 빼서 평행할수록 0에 가까워지도록 함
+                # abs()를 쓰는 이유: 전선의 방향이 180도 뒤집혀 있어도 같은 선분으로 취급하기 위함
+                losses = 1.0 - torch.abs(cos_sim)
+
+                if self.reduction == "mean":
+                    return losses.mean()
+                else:
+                    return losses.sum()
+
+            def cuda(self):
+                pass
+
+        super().__init__(coords=coords, gpu=gpu, cuda=cuda, one_hot=True, variable=variable,
+                         function=tangent_loss_fct(reduction=reduction), conf_match_weight=conf_match_weight,
+                         reduction=reduction, activation_is_exp=activation_is_exp,
+                         loss_weight_strategy=loss_weight_strategy)
+
+    def __call__(self, preds, grid_tensor, tag="none", epoch=None):
+        preds, grid_tensor, p_unmatched, gt_unmatched = super().__call__(preds, grid_tensor)
+        return self.__apply_function__(preds, grid_tensor, p_unmatched, gt_unmatched, tag=tag, epoch=epoch)
+
+class DiscriminativeEmbeddingLoss(AbstractLoss):
+    def __init__(self, coords: VariableStructure, gpu, cuda, variable: Variables, conf_match_weight, activation_is_exp,
+                 loss_weight_strategy, delta_v=0.5, delta_d=3.0,
+                 lambda_reg: float = 0.0, concat_geom_dims: int = 0, warmup_epochs: int = 0) -> None:
+        self.delta_v = delta_v
+        self.delta_d = delta_d
+        self.lambda_reg = float(lambda_reg)
+        self.concat_geom_dims = int(concat_geom_dims)
+        self.warmup_epochs = int(warmup_epochs)
+
+        super().__init__(coords=coords, gpu=gpu, cuda=cuda, one_hot=True, variable=variable,
+                         function=torch.nn.MSELoss(), conf_match_weight=conf_match_weight, reduction="mean",
+                         activation_is_exp=activation_is_exp, loss_weight_strategy=loss_weight_strategy)
+
+    def _warmup_scale(self, loss_tensor, epoch):
+        if self.warmup_epochs <= 0 or epoch is None:
+            return loss_tensor
+        scale = min(1.0, float(epoch + 1) / float(self.warmup_epochs))
+        return loss_tensor * scale
+
+    def __call__(self, embed_preds, grid_tensor, tag="none", epoch=None,
+                 batch_size=1, items_per_image=None):
+        if items_per_image is not None and batch_size > 1:
+            return self._per_image_loss(embed_preds, grid_tensor, batch_size, items_per_image, tag, epoch)
+        result = self._single_image_loss(embed_preds, grid_tensor)
+        result["total"] = self._warmup_scale(result["total"], epoch)
+        self._log_stats(result, tag, epoch)
+        return result["total"], result["total"]
+
+    def _per_image_loss(self, embed_preds, grid_tensor, batch_size, items_per_image, tag, epoch):
+        total_loss = torch.tensor(0.0, device=embed_preds.device, requires_grad=False)
+        count = 0
+        agg_pull, agg_push, agg_reg = 0.0, 0.0, 0.0
+        agg_instances, agg_embeds = 0, 0
+        agg_intra, agg_inter = [], []
+
+        for b in range(batch_size):
+            s = b * items_per_image
+            e = (b + 1) * items_per_image
+            result = self._single_image_loss(embed_preds[s:e], grid_tensor[s:e])
+            loss_val = result["total"]
+            if loss_val.requires_grad or loss_val.item() > 0:
+                total_loss = total_loss + loss_val
+                count += 1
+            agg_pull += result["pull"].item()
+            agg_push += result["push"].item()
+            agg_reg += result.get("reg", torch.tensor(0.0)).item() if isinstance(result.get("reg"), torch.Tensor) else 0.0
+            agg_instances += result["num_instances"]
+            agg_embeds += result["num_valid_embeds"]
+            if result["mean_intra_dist"] is not None:
+                agg_intra.append(result["mean_intra_dist"])
+            if result["mean_inter_dist"] is not None:
+                agg_inter.append(result["mean_inter_dist"])
+
+        if count == 0:
+            zero = torch.tensor(0.0, device=embed_preds.device)
+            return zero, zero
+        avg = total_loss / count
+        avg = self._warmup_scale(avg, epoch)
+
+        summary = {
+            "total": avg, "pull": torch.tensor(agg_pull / max(1, count)),
+            "push": torch.tensor(agg_push / max(1, count)),
+            "reg": torch.tensor(agg_reg / max(1, count)),
+            "num_instances": agg_instances // max(1, count),
+            "num_valid_embeds": agg_embeds // max(1, count),
+            "mean_intra_dist": sum(agg_intra) / len(agg_intra) if agg_intra else None,
+            "mean_inter_dist": sum(agg_inter) / len(agg_inter) if agg_inter else None,
+        }
+        self._log_stats(summary, tag, epoch)
+        return avg, avg
+
+    def _log_stats(self, result, tag, epoch):
+        log_dict = {
+            "embed_loss/total": result["total"].item() if isinstance(result["total"], torch.Tensor) else result["total"],
+            "embed_loss/pull": result["pull"].item() if isinstance(result["pull"], torch.Tensor) else result["pull"],
+            "embed_loss/push": result["push"].item() if isinstance(result["push"], torch.Tensor) else result["push"],
+            "embed_stats/num_instances": result["num_instances"],
+            "embed_stats/num_valid_embeds": result["num_valid_embeds"],
+        }
+        if result["mean_intra_dist"] is not None:
+            log_dict["embed_stats/mean_intra_dist"] = result["mean_intra_dist"]
+        if result["mean_inter_dist"] is not None:
+            log_dict["embed_stats/mean_inter_dist"] = result["mean_inter_dist"]
+        if "reg" in result and isinstance(result["reg"], torch.Tensor):
+            log_dict["embed_loss/reg"] = float(result["reg"].detach().mean().cpu())
+        Log.scalars(tag=tag, epoch=epoch, dict=log_dict)
+
+    def _single_image_loss(self, embed_preds, grid_tensor):
+        zero = torch.tensor(0.0, device=embed_preds.device)
+        empty_result = {"total": zero, "pull": zero, "push": zero, "reg": zero,
+                        "num_instances": 0, "num_valid_embeds": 0,
+                        "mean_intra_dist": None, "mean_inter_dist": None}
+
+        pos_geom = self.coords.get_position_of(Variables.GEOMETRY)
+        invalid_flags = torch.any(grid_tensor[:, pos_geom].isnan(), dim=-1)
+        valid_flags = ~invalid_flags
+        
+        valid_embeds = embed_preds[valid_flags]
+        valid_grids = grid_tensor[valid_flags]
+        
+        if len(valid_embeds) == 0:
+            return empty_result
+            
+        pos_inst = self.coords.get_position_of(Variables.INSTANCE)
+        gts = valid_grids[:, pos_inst[0]]
+        instance_valid = torch.isfinite(gts) & (gts > 0)
+        valid_embeds = valid_embeds[instance_valid]
+        valid_grids = valid_grids[instance_valid]
+        gts = gts[instance_valid]
+
+        if len(valid_embeds) == 0:
+            return empty_result
+
+        working_embeds = valid_embeds
+        if self.concat_geom_dims > 0:
+            geom_idx = pos_geom[: min(self.concat_geom_dims, len(pos_geom))]
+            geom_feat = valid_grids[:, geom_idx].detach().to(dtype=valid_embeds.dtype, device=valid_embeds.device)
+            working_embeds = torch.cat([valid_embeds, geom_feat], dim=-1)
+        
+        unique_ids, inverse = torch.unique(gts, return_inverse=True)
+        num_instances = len(unique_ids)
+
+        pull_loss = torch.tensor(0.0, device=embed_preds.device)
+        push_loss = torch.tensor(0.0, device=embed_preds.device)
+        reg_loss = torch.tensor(0.0, device=embed_preds.device)
+        intra_dists = []
+        inter_dists = []
+
+        if num_instances > 0:
+            # ---------- Vectorized cluster means ----------
+            counts = torch.bincount(inverse, minlength=num_instances).to(working_embeds.dtype).unsqueeze(1)
+            sums_w = torch.zeros((num_instances, working_embeds.shape[1]), dtype=working_embeds.dtype,
+                                 device=working_embeds.device)
+            sums_w = sums_w.index_add(0, inverse, working_embeds)
+            means_w = sums_w / torch.clamp(counts, min=1.0)
+
+            # ---------- Pull term ----------
+            dists = torch.norm(working_embeds - means_w[inverse], dim=1)
+            pull_each = torch.clamp(dists - self.delta_v, min=0.0) ** 2
+            pull_sum = torch.zeros((num_instances,), dtype=working_embeds.dtype, device=working_embeds.device)
+            pull_sum = pull_sum.index_add(0, inverse, pull_each)
+            pull_mean_per_cluster = pull_sum / torch.clamp(counts.squeeze(1), min=1.0)
+            pull_loss = pull_mean_per_cluster.mean()
+
+            # Metrics
+            intra_sum = torch.zeros((num_instances,), dtype=working_embeds.dtype, device=working_embeds.device)
+            intra_sum = intra_sum.index_add(0, inverse, dists)
+            intra_mean = intra_sum / torch.clamp(counts.squeeze(1), min=1.0)
+            intra_dists = intra_mean.detach().cpu().tolist()
+
+            # ---------- Optional reg term ----------
+            if self.lambda_reg > 0:
+                sums_e = torch.zeros((num_instances, valid_embeds.shape[1]), dtype=valid_embeds.dtype,
+                                     device=valid_embeds.device)
+                sums_e = sums_e.index_add(0, inverse, valid_embeds)
+                means_e = sums_e / torch.clamp(counts, min=1.0)
+                reg_loss = torch.sum(means_e ** 2, dim=1).mean()
+
+            # ---------- Push term (vectorized pairwise center distance) ----------
+            if num_instances > 1:
+                pairwise = torch.cdist(means_w, means_w, p=2)  # [K, K]
+                mask_offdiag = ~torch.eye(num_instances, dtype=torch.bool, device=pairwise.device)
+                push_terms = torch.clamp(self.delta_d - pairwise[mask_offdiag], min=0.0) ** 2
+                push_loss = push_terms.mean()
+
+                # reporting metric: unique-pair inter distance (upper triangle)
+                tri_i, tri_j = torch.triu_indices(num_instances, num_instances, offset=1, device=pairwise.device)
+                inter_dists = pairwise[tri_i, tri_j].detach().cpu().tolist()
+
+        total_loss = pull_loss + push_loss + self.lambda_reg * reg_loss
+        return {
+            "total": total_loss,
+            "pull": pull_loss.detach(),
+            "push": push_loss.detach(),
+            "reg": reg_loss.detach(),
+            "num_instances": num_instances,
+            "num_valid_embeds": len(valid_embeds),
+            "mean_intra_dist": sum(intra_dists) / len(intra_dists) if intra_dists else None,
+            "mean_inter_dist": sum(inter_dists) / len(inter_dists) if inter_dists else None,
+        }
+################################################################################################################################################################################
 class NormLoss(AbstractLoss):
     def __init__(self, coords: VariableStructure, gpu, cuda, variable: Variables, conf_match_weight, activation_is_exp,
                  loss_weight_strategy, reduction="mean") -> None:
@@ -286,6 +547,14 @@ class NormLoss(AbstractLoss):
 def get_loss(losses, args, coords: VariableStructure, weights: list, anchors, conf_weights):
     loss_weight_strategy = args.loss_weight_strategy
 
+    disc_kw = dict(
+        delta_v=getattr(args, "embedding_delta_v", 0.5),
+        delta_d=getattr(args, "embedding_delta_d", 3.0),
+        lambda_reg=float(getattr(args, "embedding_lambda_reg", 0.0)),
+        concat_geom_dims=int(getattr(args, "embedding_concat_geom_dims", 0)),
+        warmup_epochs=int(getattr(args, "embedding_loss_warmup_epochs", 0)),
+    )
+
     functions = []
     assert (len(coords.train_vars()) == len(losses))
     for i, loss in enumerate(losses):
@@ -312,6 +581,11 @@ def get_loss(losses, args, coords: VariableStructure, weights: list, anchors, co
                                                         conf_match_weight=conf_weights, reduction="sum",
                                                         activation_is_exp=activation_is_exp,
                                                         loss_weight_strategy=loss_weight_strategy))
+        elif loss == LOSS.FOCAL_MEAN:
+            functions.append(FocalConfidenceLoss(coords=coords, gpu=args.gpu, cuda=args.cuda, variable=variable,
+                                                conf_match_weight=conf_weights,
+                                                activation_is_exp=activation_is_exp,
+                                                loss_weight_strategy=loss_weight_strategy))
         elif loss == LOSS.MSE_SUM:
             functions.append(MeanSquaredErrorLoss(reduction="sum", coords=coords, gpu=args.gpu, cuda=args.cuda,
                                                   variable=variable, batch_size=args.batch_size,
@@ -329,13 +603,42 @@ def get_loss(losses, args, coords: VariableStructure, weights: list, anchors, co
                 NormLoss(coords=coords, gpu=args.gpu, cuda=args.cuda, variable=variable, conf_match_weight=conf_weights,
                          activation_is_exp=activation_is_exp, loss_weight_strategy=loss_weight_strategy,
                          reduction="mean"))
+        # (기존 코드)
         elif loss == LOSS.NORM_SUM:
             functions.append(
                 NormLoss(coords=coords, gpu=args.gpu, cuda=args.cuda, variable=variable, conf_match_weight=conf_weights,
                          activation_is_exp=activation_is_exp, loss_weight_strategy=loss_weight_strategy,
                          reduction="sum"))
+    #####################################################################################################################################
+        # (신규 추가)
+        elif loss == LOSS.TANGENT_COSINE:
+            functions.append(
+                TangentCosineLoss(coords=coords, gpu=args.gpu, cuda=args.cuda, variable=variable, conf_match_weight=conf_weights,
+                         activation_is_exp=activation_is_exp, loss_weight_strategy=loss_weight_strategy,
+                         reduction="mean"))
+        elif loss == LOSS.DISCRIMINATIVE_EMBEDDING:
+            functions.append(
+                DiscriminativeEmbeddingLoss(coords=coords, gpu=args.gpu, cuda=args.cuda, variable=variable,
+                                           conf_match_weight=conf_weights,
+                                           activation_is_exp=activation_is_exp,
+                                           loss_weight_strategy=loss_weight_strategy,
+                                           **disc_kw))
+        ########################################################################################################################################################
         else:
             raise NotImplementedError("Unknown loss type %s" % loss)
+
+    # Option A: INSTANCE는 geom head가 아니라 embed head에서만 학습.
+    # coords.train_vars()에는 INSTANCE가 없어도, GT grid_tensor에는 INSTANCE가 존재하므로 loss는 추가 가능.
+    if getattr(args, "train_instance_embedding", False) \
+            and not any(type(f) is DiscriminativeEmbeddingLoss for f in functions):
+        functions.append(
+            DiscriminativeEmbeddingLoss(
+                coords=coords, gpu=args.gpu, cuda=args.cuda, variable=Variables.INSTANCE,
+                conf_match_weight=conf_weights, activation_is_exp=False,
+                loss_weight_strategy=loss_weight_strategy,
+                **disc_kw,
+            )
+        )
     composed_loss = LossComposition(losses=functions, args=args, coords=coords, weights=weights, anchors=anchors)
     return composed_loss
 
@@ -410,24 +713,13 @@ class LossComposition:
             raise ValueError("Please specify the same number of loss terms as weights, we got %s loss terms, "
                              "but %s weights." % (self.losses, self.weights))
 
-    def __call__(self, preds, grid_tensor, filenames, epoch, tag="dummy_loss"):
-        """
-
-        Args:
-            preds (torch.tensor):
-                with shape [batch, cells, preds, vars]
-            grid_tensor (torch.tensor):
-                with shape [batch, cells, preds, vars]
-
-        Returns:
-            loss (list):
-                with len num_vars_to_train
-            weighted_losses (torch.tensor)
-        """
-        if torch.any(torch.isnan(preds)):
+    def __call__(self, geom_preds, embed_preds, grid_tensor, filenames, epoch, tag="dummy_loss"):
+        if torch.any(torch.isnan(geom_preds)):
             raise ValueError("Prediction can not contain nans!")
+        Log.debug("LossComposition input shapes geom=%s embed=%s gt=%s "
+                  "(target geom~[B, 1024, 8, vars_train], embed~[B, 1024, 8, 8])"
+                  % (tuple(geom_preds.shape), tuple(embed_preds.shape), tuple(grid_tensor.shape)))
 
-        num_batches, num_cells, num_predictors, _ = preds.shape
         weighted_losses = torch.zeros((1), device=self.args.cuda, dtype=torch.float32)
         losses = []
         mean_losses = []
@@ -435,61 +727,73 @@ class LossComposition:
         from datetime import datetime
         from datetime import timedelta
         start = datetime.now()
+        
         if self.args.anchors == AnchorDistribution.NONE:
-            preds, reduced_grid_tensor = self.matcher.sort_cells_by_geometric_match(preds=preds,
-                                                                                    grid_tensor=grid_tensor,
-                                                                                    epoch=epoch, tag=tag,
-                                                                                    filenames=filenames)
+            geom_preds_sorted, reduced_grid_tensor = self.matcher.sort_cells_by_geometric_match(
+                                                                preds=geom_preds,
+                                                                grid_tensor=grid_tensor,
+                                                                epoch=epoch, tag=tag,
+                                                                filenames=filenames)
+            geom_preds_flat = geom_preds_sorted.reshape(-1, self.coords.num_vars_to_train())
+            embed_preds_flat = embed_preds.reshape(-1, embed_preds.shape[-1])
         else:
-            self.matcher._debug_full_match_plot_(epoch=epoch, preds=preds, grid_tensor=grid_tensor, filenames=filenames,
-                                                 tag="loss", anchors=self.anchors, idx=ImageIdx.LOSS)
             reduced_grid_tensor = grid_tensor.reshape(-1, self.coords.get_length())
-            preds = preds.reshape(-1, self.coords.num_vars_to_train())
+            geom_preds_flat = geom_preds.reshape(-1, self.coords.num_vars_to_train())
+            embed_preds_flat = embed_preds.reshape(-1, embed_preds.shape[-1])
 
         end = datetime.now()
         seconds = ((end - start) / timedelta(milliseconds=1))
         Log.debug("Matching done in %dms" % (seconds))
 
-        nice_idx = (6 * 27 + 1) % preds.shape[0]
-        Log.debug("Loss on e.g.\n%s\n%s" % (preds[nice_idx], reduced_grid_tensor[nice_idx]))
+        batch_size = geom_preds.shape[0]
+        items_per_image = geom_preds.shape[1] * geom_preds.shape[2]
+
         for i, t in enumerate(self.losses):
             if torch.all(reduced_grid_tensor[:, self.coords.get_position_of(t.variable)].isnan()):
-                Log.debug("We skip loss calc for %s as there are no labels" % str(t.variable))
                 losses.append(0)
                 mean_losses.append(0)
-                weighted_losses = 0
+                continue
             elif torch.all(reduced_grid_tensor[:, self.coords.get_position_of(Variables.GEOMETRY)].isnan()) \
                     and t.variable != Variables.CONF:
-                Log.warning("We skip loss calc for %s as there is no geometry and thus no matching"
-                            % str(t.variable))
                 losses.append(0)
                 mean_losses.append(0)
-                weighted_losses = 0
+                continue
             else:
                 t: AbstractLoss
-                loss_val, mean_loss_val = t(preds, reduced_grid_tensor, tag=tag, epoch=epoch)
-                loss_val: torch.tensor
+                try:
+                    if t.variable == Variables.INSTANCE:
+                        loss_val, mean_loss_val = t(embed_preds_flat, reduced_grid_tensor, tag=tag, epoch=epoch,
+                                                    batch_size=batch_size, items_per_image=items_per_image)
+                    else:
+                        loss_val, mean_loss_val = t(geom_preds_flat, reduced_grid_tensor, tag=tag, epoch=epoch)
+                except ValueError as e:
+                    if "No valid data" in str(e):
+                        loss_val = torch.tensor(0.0, device=geom_preds_flat.device, requires_grad=True)
+                        mean_loss_val = torch.tensor(0.0, device=geom_preds_flat.device)
+                    else:
+                        raise e
 
                 variable_strings = ("conf" if self.losses[i].variable == Variables.CONF
                                     else str(self.losses[i].variable))
-                is_exp = get_activations(self.args.activations, self.coords, self.args.linerep).activations[i].is_exp()
+                activation_list = get_activations(self.args.activations, self.coords, self.args.linerep).activations
+                is_exp = activation_list[i].is_exp() if i < len(activation_list) else False
 
                 add_weights, weight_factors = get_actual_weight(epoch, variable_strings,
                                                                 weight_strategy=self.args.loss_weight_strategy,
                                                                 weight=self.weights[i],
                                                                 activation_is_exponential=is_exp)
 
-                mean_losses.append(mean_loss_val.detach().cpu())  # / (num_predictors * num_cells))
-                losses.append(loss_val.detach().cpu())  # / (num_predictors * num_cells))
+                mean_losses.append(mean_loss_val.detach().cpu()) 
+                losses.append(loss_val.detach().cpu())  
                 l = loss_val * weight_factors + add_weights
+                
+                # 에러나던 len(preds)를 len(geom_preds_flat)으로 수정
                 Log.scalars(tag=tag, epoch=epoch,
                             dict={os.path.join("loss_" + variable_strings + "_batch", "sum",
-                                               "weighted"): l.item() / len(preds)})
+                                               "weighted"): l.item() / max(1, len(geom_preds_flat))}) # 0 나누기 방지용 max 추가
                 Log.scalars(tag=tag, epoch=epoch, dict={"loss_batch/sum/weighted": weighted_losses})
 
                 weighted_losses += l
-            Log.debug("After %s we get [sum] loss = %s (total=%s)" % (str(t), losses[i], weighted_losses))
-            Log.scalars(tag=tag, epoch=epoch, dict={"loss_batch/sum/weighted": weighted_losses})
 
         return losses, weighted_losses, mean_losses
 

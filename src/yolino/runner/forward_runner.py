@@ -37,7 +37,14 @@ class ForwardRunner:
             if preloaded_model is None:
                 coords = DatasetFactory.get_coords("train", args)  # split does not matter
             else:
-                coords = preloaded_model.coords
+                # DDP wraps the original nn.Module under `.module`.
+                if hasattr(preloaded_model, "coords"):
+                    coords = preloaded_model.coords
+                elif hasattr(preloaded_model, "module") and hasattr(preloaded_model.module, "coords"):
+                    coords = preloaded_model.module.coords
+                else:
+                    raise AttributeError("Could not resolve coords from preloaded model. "
+                                         "Expected `.coords` or `.module.coords`.")
 
         if preloaded_model:
             self.model = preloaded_model

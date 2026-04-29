@@ -1,0 +1,32 @@
+dataset: "ttpla"
+run_name: "exp03_backbone_convnext_nofpn_confgated"
+
+batch_size: 8
+epoch: 50
+img_height: 576
+
+scale: 32
+head_level: P4
+backbone: convnext
+use_fpn: false
+backbone_pretrained: True
+
+training_variables: geom,confidence
+activations: linear,sigmoid
+loss: norm_mean,mse_mean
+loss_weight_strategy: fixed
+weights: "2,1"
+conf_match_weight: 5,1
+confidence: 0.3
+
+# Keep matching mode same as baseline; change backbone only.
+loss_hard_matching: true
+match_by_conf_first: true
+use_conf_in_loss_matching: false
+
+amp: false
+loading_workers: 4
+augment: crop,rotation,jitter,erasing,noise,normalize
+keep: "True"
+checkpoint_iteration: "1"
+eval_iteration: "1"

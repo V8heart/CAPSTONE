@@ -318,7 +318,7 @@ class Log():
 
         dict = {"time/%s" % key: value}
         if Logger.TENSORBOARD in Log.__loggers__:
-            Log.__tb__.add_scalar(key, dict)
+            Log.__tb__.add_scalar(key, value)
 
         if Logger.CLEARML in Log.__loggers__:
             Log.__trains__.report_scalar("time", key, value=value)
@@ -342,13 +342,18 @@ class Log():
     def scalars(self, tag, dict, epoch, level=1):
         new_dict = {}
         for k, v in dict.items():
-
+            # 1. 값이 넘파이 배열이나 리스트인 경우 (기존 로직 유지)
             if type(v) == np.ndarray or type(v) == list:
                 if len(v) == 1:
                     new_dict[str(k) + "/" + tag] = v[0]
                 else:
                     Log.info("Miss to push %s: %s" % (k, v))
                     continue
+            # 2. [추가] 값이 딕셔너리인 경우 (Flatten 평탄화 처리)
+            elif type(v).__name__ == 'dict':
+                for sub_k, sub_v in v.items():
+                    new_dict[str(k) + "_" + str(sub_k) + "/" + tag] = sub_v
+            # 3. 값이 단순 숫자인 경우 (기존 로직)
             else:
                 new_dict[str(k) + "/" + tag] = v
 
