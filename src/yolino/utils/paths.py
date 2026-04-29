@@ -36,6 +36,11 @@ class Paths:
         :rtype: object
         """
         self._lock = threading.Lock()
+        if id is None:
+            # Final defensive fallback for callers that forgot to initialize run id.
+            id = time.strftime("%y-%b-%d_%H-%M-%S")
+            Log.warning("Paths received id=None; using timestamp fallback id.")
+        id = str(id)
 
         qeval = os.path.join("qeval", split)
         dvc = os.path.abspath(dvc)

@@ -76,11 +76,17 @@ class TrainHandler:
         # model
         self.model, scheduler_checkpoint, self.model_epoch = load_checkpoint(args, self.dataset.coords)
         if getattr(args, "distributed", False):
+            # If embedding supervision is disabled, embed-head parameters remain unused by loss.
+            # DDP must then track unused params to avoid reducer bucket rebuild failures.
+            ddp_find_unused = bool(getattr(args, "ddp_find_unused_parameters", False))
+            if not getattr(args, "train_instance_embedding", False) and not ddp_find_unused:
+                ddp_find_unused = True
+                Log.warning("Forcing ddp_find_unused_parameters=True because instance embedding loss is disabled.")
             self.model = torch.nn.parallel.DistributedDataParallel(
                 self.model,
                 device_ids=[args.local_rank] if args.gpu else None,
                 output_device=args.local_rank if args.gpu else None,
-                find_unused_parameters=bool(getattr(args, "ddp_find_unused_parameters", False)),
+                find_unused_parameters=ddp_find_unused,
             )
 
         # geom head terms (+ optional instance embedding term)

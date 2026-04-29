@@ -247,16 +247,25 @@ def __set_hash__(args):
     timestamp = now.strftime("%y-%b-%d_%H-%M-%S-%f")
 
     run_name = getattr(args, "run_name", None)
-    if run_name:
+    if run_name is not None:
         # Sanitize: replace spaces with underscores, strip unsafe chars
-        safe_name = run_name.strip().replace(" ", "_")
-        args.id = safe_name
-        Log.info(f"Run name set to '{args.id}' (outputs will be stored under this name)")
+        safe_name = str(run_name).strip().replace(" ", "_")
+        if len(safe_name) > 0 and safe_name.lower() != "none":
+            args.id = safe_name
+            Log.info(f"Run name set to '{args.id}' (outputs will be stored under this name)")
+        else:
+            args.id = timestamp
+            Log.warning("Received empty/invalid --run_name; fallback to timestamp run id.")
     else:
         args.id = timestamp
 
 
 def __set_paths__(args):
+    if getattr(args, "id", None) is None:
+        # Defensive guard: do not allow None to reach Paths/os.path.join.
+        from datetime import datetime
+        args.id = datetime.now().strftime("%y-%b-%d_%H-%M-%S-%f")
+        Log.warning("Run id was None before path setup; generated timestamp fallback id.")
     args.paths = Paths(dvc=args.dvc, split=args.split, explicit_model=args.explicit_model,
                        debug_tool_name=args.debug_tool_name, id=args.id, keep_checkpoints=args.keep)
     return args

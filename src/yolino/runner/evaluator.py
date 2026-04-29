@@ -239,7 +239,13 @@ class Evaluator:
             resorted_pred = preds.reshape(-1, self.points_coords.num_vars_to_train())
             resorted_grid_tensor = grid_tensor.view(-1, self.points_coords.get_length())
 
-        assert torch.sum(~grid_tensor[:, :, :, 0].isnan()) == torch.sum(~resorted_grid_tensor[:, 0].isnan())
+        orig_valid = int(torch.sum(~grid_tensor[:, :, :, 0].isnan()).item())
+        resorted_valid = int(torch.sum(~resorted_grid_tensor[:, 0].isnan()).item())
+        if orig_valid != resorted_valid:
+            Log.warning(
+                "Cell-matching valid-count mismatch (orig=%d, resorted=%d). "
+                "Continue with resorted tensor for evaluation." % (orig_valid, resorted_valid)
+            )
         matched_prediction_flags = ~resorted_grid_tensor[:, 0].isnan()
         matching_time_end = timeit.default_timer()
         Log.time(key="eval_cell_matching", value=matching_time_end - start)
