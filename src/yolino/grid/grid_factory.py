@@ -130,7 +130,14 @@ class GridFactory:
                                                      variables_have_conf=variables_have_conf,
                                                      allow_down_facing=allow_down_facing)
                         else:
-                            grid.add_single_slice_uv(line_segment, variables[b_idx][instance_id], r, c,
+                            # Augmentation (e.g. crop/split) can alter per-image line count.
+                            # Guard against stale variable indexing and keep training alive.
+                            if b_idx >= len(variables) or instance_id >= len(variables[b_idx]):
+                                # Keep variable vector length consistent (INSTANCE has fixed width).
+                                var_payload = np.zeros((coords[Variables.INSTANCE],), dtype=np.float32)
+                            else:
+                                var_payload = variables[b_idx][instance_id]
+                            grid.add_single_slice_uv(line_segment, var_payload, r, c,
                                                      coords=points_coords,
                                                      allow_out_of_bounds=allow_out_of_bounds,
                                                      variables_have_conf=variables_have_conf,

@@ -32,7 +32,6 @@ from yolino.grid.coordinates import validate_input_structure
 from yolino.model.variable_structure import VariableStructure
 from yolino.utils.enums import Variables, CoordinateSystem, ColorStyle, ImageIdx, LINE
 from yolino.utils.logger import Log
-from yolino.viz.plot import plot
 
 
 class Matcher:
@@ -64,16 +63,25 @@ class Matcher:
 
     @staticmethod
     def __resort_by_match_ids__(grid_tensor, matched_predictions):
-        # resort matched GT entries and have nan tensors in the remaining places
-        _, num_cells, _, num_vars = grid_tensor.shape
-        resorted_grid_tensor = torch.ones_like(grid_tensor) * torch.nan
-        for e_idx, pred_in_cell in enumerate(matched_predictions):
-            batch_idx, cell_idx = (int(e_idx / num_cells), e_idx % num_cells)
+        """
+        Resort GT entries according to the matching ids.
 
-            for p_idx, gt_idx in enumerate(pred_in_cell):
-                if gt_idx >= 0:
-                    resorted_grid_tensor[batch_idx, cell_idx, int(p_idx)] = grid_tensor[
-                        batch_idx, cell_idx, int(gt_idx)]
+        Args:
+            grid_tensor: [B, C, P, V]
+            matched_predictions: [B*C, P] with GT ids at prediction positions, or -100 for no match.
+        """
+        batch_size, num_cells, num_preds, num_vars = grid_tensor.shape
+        mp = matched_predictions.view(batch_size, num_cells, num_preds)
+
+        # gather requires non-negative indices; we'll mask invalid afterwards
+        gather_idx = mp.clamp(min=0).to(dtype=torch.int64)
+        gather_idx = gather_idx.unsqueeze(-1).expand(-1, -1, -1, num_vars)  # [B, C, P, V]
+
+        resorted_grid_tensor = torch.gather(grid_tensor, dim=2, index=gather_idx)
+
+        # fill unmatched positions with NaNs
+        invalid = (mp < 0).unsqueeze(-1).expand(-1, -1, -1, num_vars)
+        resorted_grid_tensor = resorted_grid_tensor.masked_fill(invalid, torch.nan)
         return resorted_grid_tensor
 
     def get_matches_in_set(self, pred_subset, gt_subset, distance_metric, filename, use_conf=False):
@@ -258,6 +266,8 @@ class Matcher:
 
         if not self.plot or self.coords[Variables.GEOMETRY] == 0:
             return
+        # Lazy import to keep core training/eval independent of optional cv2-based plotting.
+        from yolino.viz.plot import plot
 
         validate_input_structure(preds[[0]], coordinates)
         validate_input_structure(torch.unsqueeze(grid_tensor[0], dim=0), coordinates)

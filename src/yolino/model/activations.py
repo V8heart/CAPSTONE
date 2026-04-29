@@ -105,25 +105,35 @@ class ActivationComposition:
 
     def __call__(self, logits):
         """
-
         Args:
-            logits (torch.tensor):
-                with shape [batch, cells, preds, vars]
+            logits: 
+                단일 torch.tensor (geom-only) 또는 (geom_logits, embed_logits) 튜플.
 
-        Returns:
-            torch.tensor:
-                with shape [batch, cells, preds, vars]
+        Note:
+            Option A(Decoupled head): INSTANCE는 embed head가 담당하므로,
+            activation은 geom_logits에만 적용하고 embed_logits는 그대로 반환합니다.
         """
-        nice_idx = (0, (6 * 27 + 1) % logits.shape[1], 0)
-        Log.debug("Activation on e.g.\n%s" % logits[nice_idx])
+        is_tuple = isinstance(logits, tuple)
+        if is_tuple:
+            geom_logits, embed_logits = logits
+            combined_logits = geom_logits
+        else:
+            combined_logits = logits
+
+        nice_idx = (0, (6 * 27 + 1) % combined_logits.shape[1], 0)
+        Log.debug("Activation on e.g.\n%s" % combined_logits[nice_idx])
+        
         for t in self.activations:
-            logits = t(logits)
+            combined_logits = t(combined_logits)
             Log.debug(
                 "After %s for %s %s we get\n%s" % (str(t.__class__).replace("class 'yolino.model.activations.", ""),
                                                    t.variable, str(t.coords.get_position_of(t.variable)),
-                                                   logits[nice_idx]))
+                                                   combined_logits[nice_idx]))
 
-        return logits
+        if is_tuple:
+            return combined_logits, embed_logits
+        return combined_logits
+
 
     def __repr__(self):
         string = "Activation Composition <"

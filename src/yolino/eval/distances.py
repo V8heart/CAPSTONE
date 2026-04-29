@@ -39,7 +39,12 @@ def get_hungarian_match(cost_matrix):
     from scipy.optimize import linear_sum_assignment
     # is ok as this is not part of the actual loss that would need to be differentiable
     try:
-        row_ind, col_ind = linear_sum_assignment(cost_matrix.detach().cpu().numpy())
+        cost_matrix_np = cost_matrix.detach().cpu().numpy()
+        
+        # --- [강력한 방어 코드] NaN이나 무한대(Inf) 값을 엄청나게 큰 거리(1e9)로 덮어씌워서 무시하게 만듭니다 ---
+        cost_matrix_np[np.isnan(cost_matrix_np) | np.isinf(cost_matrix_np)] = 1e9
+        # ---------------------------------------------------------------------------------------
+        row_ind, col_ind = linear_sum_assignment(cost_matrix_np)
     except ValueError as e:
         m = cost_matrix.detach().cpu().numpy()
         Log.error("Cost matrix %s" % str(m.shape))
@@ -76,9 +81,16 @@ def linesegment_hausdorff_distance(gt, pred, gt_class_indices, pred_class_indice
 
 
 def cosine_similarity(gt, len_gt, pred, len_pred):
-    dot = torch.dot(gt[2:4] - gt[0:2], pred[2:4] - pred[0:2])
-    cos = dot / (len_gt * len_pred)
-    return max(-1, min(1, cos))  # sometimes this is marginally above 1
+    # Keep distance math in a single dtype to avoid Float/Half mismatches from AMP predictions.
+    gt_v = gt.to(dtype=torch.float32)
+    pred_v = pred.to(dtype=torch.float32)
+    len_gt_v = len_gt.to(dtype=torch.float32) if isinstance(len_gt, torch.Tensor) else torch.tensor(float(len_gt))
+    len_pred_v = len_pred.to(dtype=torch.float32) if isinstance(len_pred, torch.Tensor) else torch.tensor(float(len_pred))
+
+    dot = torch.dot(gt_v[2:4] - gt_v[0:2], pred_v[2:4] - pred_v[0:2])
+    denom = torch.clamp(len_gt_v * len_pred_v, min=1e-12)
+    cos = dot / denom
+    return torch.clamp(cos, min=-1.0, max=1.0)  # sometimes this is marginally above 1
 
 
 def linesegment_cosine_distance(gt, preds, coords: VariableStructure, use_conf=False):
@@ -153,10 +165,15 @@ def get_perpendicular_sum_distance(gt, len_gt, pred, len_pred):
 
 # remainder of projection
 def get_parallel_distance(gt, len_gt, pred, len_pred):
-    dot = torch.dot(gt[2:4] - gt[0:2], pred[2:4] - pred[0:2])
-    len_projection_on_gt = dot / len_gt
-    len_projection_on_pred = dot / len_pred
-    parallel_dist = max(len_gt - len_projection_on_gt, len_pred - len_projection_on_pred)
+    gt_v = gt.to(dtype=torch.float32)
+    pred_v = pred.to(dtype=torch.float32)
+    len_gt_v = len_gt.to(dtype=torch.float32) if isinstance(len_gt, torch.Tensor) else torch.tensor(float(len_gt))
+    len_pred_v = len_pred.to(dtype=torch.float32) if isinstance(len_pred, torch.Tensor) else torch.tensor(float(len_pred))
+
+    dot = torch.dot(gt_v[2:4] - gt_v[0:2], pred_v[2:4] - pred_v[0:2])
+    len_projection_on_gt = dot / torch.clamp(len_gt_v, min=1e-12)
+    len_projection_on_pred = dot / torch.clamp(len_pred_v, min=1e-12)
+    parallel_dist = torch.maximum(len_gt_v - len_projection_on_gt, len_pred_v - len_projection_on_pred)
     return parallel_dist
 
 

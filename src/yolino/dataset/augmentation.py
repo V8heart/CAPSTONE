@@ -22,7 +22,7 @@ import math
 
 import cv2
 import torch
-from torchvision.transforms import ColorJitter, RandomErasing, Normalize, RandomCrop, RandomRotation, Resize
+from torchvision.transforms import ColorJitter, RandomErasing, Normalize, RandomCrop, RandomRotation, Resize, GaussianBlur
 from torchvision.transforms import functional as F
 from torchvision.transforms.transforms import _setup_angle
 from yolino.utils.enums import Augmentation, CoordinateSystem, ColorStyle, ImageIdx
@@ -49,7 +49,9 @@ class Compose:
                 if not ok:
                     errors.append(t)
             else:
-                if isinstance(t, ColorJitter) or isinstance(t, RandomErasing) or isinstance(t, Normalize):
+                if isinstance(t, ColorJitter) or isinstance(t, RandomErasing) or isinstance(t, Normalize) \
+                        or isinstance(t, GaussianBlur) or isinstance(t, RandomGaussianBlur) \
+                        or isinstance(t, AddGaussianNoise):
                     img = t(img)
                 else:
                     img = t(img, params=params)
@@ -78,6 +80,12 @@ class DatasetTransformer:
         self.jitter_saturation = 0.5
         self.jitter_contrast = 0.5
         self.jitter_brightness = 0.5
+        # Mild image degradations frequently seen in distant powerline imagery.
+        self.blur_kernel = (3, 3)
+        self.blur_sigma = (0.1, 0.8)
+        self.blur_p = 0.1
+        self.noise_std = 0.01
+        self.noise_p = 0.1
 
         self.plot = args.plot
 
@@ -86,7 +94,13 @@ class DatasetTransformer:
         self.rotation_degrees = math.degrees(args.rotation_range)
 
         self.args = args
-        self.methods = args.augment if args.augment else []
+        self.methods = list(args.augment) if args.augment else []
+        # ConvNeXt pretrained backbone expects ImageNet-normalized input.
+        # Auto-enable normalization unless explicitly disabled by the user.
+        if getattr(args, "backbone_pretrained", False) and Augmentation.NORM not in self.methods:
+            self.methods.append(Augmentation.NORM)
+            Log.info("Auto-enabled augmentation 'normalize' for pretrained ConvNeXt backbone "
+                     "(ImageNet mean/std).")
 
         self.sky_crop = sky_crop
         self.side_crop = side_crop
@@ -162,6 +176,19 @@ class DatasetTransformer:
                     transforms_to_compose.append(RandomErasing(p=self.erasing_p, scale=self.erasing_scale,
                                                                ratio=self.erasing_ratio,
                                                                value=self.erasing_value))
+            if Augmentation.BLUR in self.methods:
+                if not fixed:
+                    transforms_to_compose.append(RandomGaussianBlur(
+                        kernel_size=self.blur_kernel,
+                        sigma=self.blur_sigma,
+                        p=self.blur_p
+                    ))
+            if Augmentation.NOISE in self.methods:
+                if not fixed:
+                    transforms_to_compose.append(AddGaussianNoise(
+                        std=self.noise_std,
+                        p=self.noise_p
+                    ))
         if not keep_scale:
             transforms_to_compose.append(FixedScale(target_size=target_size))
         text = ""
@@ -211,9 +238,14 @@ class FixedScale(torch.nn.Module):
         _, i_h, i_w = image.shape
         h, w = self.target_size
 
-        scale = 1 / (i_h / h)
+        # Labels in YOLinO augmentation pipeline are stored as (y, x).
+        # Use anisotropic factors to keep label/image geometry consistent
+        # when source and target aspect ratios differ.
+        scale_y = h / float(i_h)
+        scale_x = w / float(i_w)
         if label is not None:
-            label = label * torch.tensor(scale)
+            scale = torch.tensor([scale_y, scale_x], dtype=label.dtype, device=label.device)
+            label = label * scale
 
         image = self.resize(image)
         return image, label, True
@@ -369,3 +401,37 @@ class RandomCropWithLabels(torch.nn.Module):
     def __repr__(self):
         s = '(crop={}, '.format(self.crop_portion)
         return self.__class__.__name__ + s
+
+
+class RandomGaussianBlur(torch.nn.Module):
+    def __init__(self, kernel_size=(3, 3), sigma=(0.1, 1.5), p=0.2):
+        super().__init__()
+        self.p = float(p)
+        self.blur = GaussianBlur(kernel_size=kernel_size, sigma=sigma)
+        self.use_label = False
+
+    def __call__(self, image):
+        if torch.rand(1).item() < self.p:
+            return self.blur(image)
+        return image
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(p={self.p})"
+
+
+class AddGaussianNoise(torch.nn.Module):
+    def __init__(self, mean=0.0, std=0.02, p=0.2):
+        super().__init__()
+        self.mean = float(mean)
+        self.std = float(std)
+        self.p = float(p)
+        self.use_label = False
+
+    def __call__(self, image):
+        if torch.rand(1).item() >= self.p:
+            return image
+        noise = torch.randn_like(image) * self.std + self.mean
+        return torch.clamp(image + noise, 0.0, 1.0)
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(std={self.std}, p={self.p})"

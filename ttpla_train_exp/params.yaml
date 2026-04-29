@@ -1,0 +1,63 @@
+dataset: "ttpla"
+batch_size: 8                     # per-GPU batch for BN stability in DDP
+epoch: 100
+keep: 'True'
+checkpoint_iteration: '1'
+eval_iteration: '1'
+
+img_height: 576                  # keep 16:9 downsample aspect ratio (576x1024)
+conf_match_weight: 1,10
+best_mean_loss: true
+confidence: 0.6
+loggers: ["file", "tb"]
+
+# ---- Backbone (ConvNeXt-Tiny + FPN) ----
+# Darknet 가중치는 더 이상 사용하지 않음. 인자만 남겨둠 (general_setup의 경고를 피하기 위함).
+darknet_weights: "/home/work/caps_drone/yolino/YOLinO/ttpla_train_exp/yolov3.weights"
+fpn_out_channels: 256
+head_level: P3                    # P3 → stride 16
+backbone_pretrained: True
+fpn_upsample_mode: nearest
+backbone_freeze_epochs: 2         # 처음 2 epoch은 ConvNeXt body 동결 → FPN/Heads 안정화
+
+# 그리드/스케일 (P3에 맞춤)
+scale: 16                         # 1024 / 16 = 64 → 64x64 = 4096 cells
+
+# ---- Stage 1 (Geometry-first) ----
+# 새 백본/FPN/헤드를 안정화하기 위해 instance embedding은 잠시 비활성화.
+# Stage 2에서 다시 ON 하고 워밍업 적용.
+training_variables: geom,confidence
+loss: norm_mean,mse_mean
+activations: linear,sigmoid
+
+# Multi-task weighting
+loss_weight_strategy: fixed
+weights: "2.0,1.0"                # geom 우선
+
+# ---- Layer-wise LR (ConvNeXt 사전학습 + 신규 헤드용) ----
+learning_rate: 0.001              # 기본/loss_weight 학습용
+lr_backbone: 0.00002              # ConvNeXt body (사전학습)
+lr_fpn:      0.0002               # FPN (from-scratch)
+lr_geom:     0.0005               # Geometry head
+# lr_embed:    0.001                # Embedding head (Stage 2에서 사용)
+scheduler: warmup_cosine
+warmup_epochs: 1
+min_lr_ratio: 0.05
+scheduler_step_per_batch: True
+amp: True
+grad_clip_norm: 5.0
+ddp_find_unused_parameters: True
+# ---- Augmentation (TTPLA / powerline robust) ----
+# blur/noise를 추가해 얇은 전선의 원거리/압축/센서 열화에 대한 강건성을 높임.
+augment: crop,rotation,jitter,erasing,noise,normalize
+
+# ---- (Stage 2에서 활성화 예정 — 참고용, 지금은 주석) ----
+# training_variables: geom,confidence,instance
+# loss: norm_mean,mse_mean,discriminative_embedding
+# activations: linear,sigmoid,linear
+# weights: "1.5,1.0,0.2"          # 임베딩 가중치 작게 시작
+# embedding_delta_v: 0.5
+# embedding_delta_d: 2.0
+# embedding_lambda_reg: 0.001
+# embedding_loss_warmup_epochs: 5  # 0→1 선형 워밍업
+# lr_embed: 0.001

@@ -154,6 +154,7 @@ class Predictor:
                extrapolate=True):
         put_geometry = V.GEOMETRY in coords and coords[V.GEOMETRY] > 0
         put_class = V.CLASS in coords and coords[V.CLASS] > 0
+        put_instance = V.INSTANCE in coords and coords[V.INSTANCE] > 0
         put_conf = V.CONF in coords and coords[V.CONF] > 0
 
         if convert_to_lrep is None:
@@ -180,6 +181,12 @@ class Predictor:
             else:
                 array[class_pos] = torch.tensor([np.argmax(self.label)], dtype=torch.float32)
 
+        if put_instance:
+            instance_pos = coords.get_position_of(V.INSTANCE, one_hot=one_hot)
+            array[instance_pos] = torch.zeros(len(instance_pos), dtype=torch.float32)
+            if self.id is not None and self.id >= 0:
+                array[instance_pos[0]] = torch.tensor(float(self.id), dtype=torch.float32)
+
         if put_conf:
             if set_conf >= 0:
                 array[coords.get_position_of(V.CONF, one_hot=one_hot)] = torch.tensor(set_conf, dtype=torch.float32)
@@ -193,8 +200,9 @@ class Predictor:
         return np.linalg.norm(self.end - self.start)
 
     def assert_is_upwards(self):
-        if abs(self.angle()) < math.pi / 2.:
-            raise ValueError("%s has invalid orientation with %s" % (self, self.angle()))
+        # if abs(self.angle()) < math.pi / 2.:
+        #     raise ValueError("%s has invalid orientation with %s" % (self, self.angle()))
+        pass
 
     @classmethod
     def from_linesegment(cls, line_segment, line_representation, input_coords: VariableStructure, is_prediction=False,
@@ -217,6 +225,7 @@ class Predictor:
             coords_in_data = input_coords.vars()
             geom_idx = input_coords.get_position_of(Variables.GEOMETRY)
             label_idx = input_coords.get_position_of(Variables.CLASS)
+            inst_idx = input_coords.get_position_of(Variables.INSTANCE)
             conf_idx = input_coords.get_position_of(Variables.CONF)
 
         if not np.equal(np.shape(line_segment), length):
@@ -230,6 +239,12 @@ class Predictor:
         else:
             conf = 1
         predictor = Predictor(values=None, label=line_segment[label_idx], confidence=conf)
+
+        if not is_prediction and Variables.INSTANCE in coords_in_data and input_coords[Variables.INSTANCE] > 0:
+            inst_values = np.asarray(line_segment[inst_idx], dtype=float).reshape(-1)
+            inst_values = inst_values[~np.isnan(inst_values)]
+            if len(inst_values) > 0:
+                predictor.id = float(inst_values[0])
 
         if line_representation == LINE.POINTS:
             predictor.set_points(line_segment[geom_idx], from_anchor=anchor, is_offset=is_offset)

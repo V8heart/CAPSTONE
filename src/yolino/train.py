@@ -19,17 +19,39 @@
 # ----------------------------- COPYRIGHT ------------------------------------ #
 # ---------------------------------------------------------------------------- #
 import timeit
+import os
 
 import torch
 from tqdm import tqdm
+from yolino.model.optimizer_factory import maybe_freeze_backbone
 from yolino.runner.trainer import TrainHandler
 from yolino.utils.general_setup import general_setup
 from yolino.utils.logger import Log
+
+
+def _setup_distributed(args):
+    args.world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    args.rank = int(os.environ.get("RANK", "0"))
+    args.local_rank = int(os.environ.get("LOCAL_RANK", str(getattr(args, "gpu_id", 0))))
+    args.distributed = args.world_size > 1
+    args.is_main_process = args.rank == 0
+
+    if args.distributed:
+        if args.gpu:
+            torch.cuda.set_device(args.local_rank)
+            args.cuda = f"cuda:{args.local_rank}"
+        backend = "nccl" if args.gpu else "gloo"
+        torch.distributed.init_process_group(backend=backend, init_method="env://")
+        Log.warning("DDP enabled rank=%d/%d local_rank=%d backend=%s"
+                    % (args.rank, args.world_size, args.local_rank, backend))
+    return args
+
 
 if __name__ == "__main__":
     start = timeit.default_timer()
     try:
         args = general_setup("Training")
+        args = _setup_distributed(args)
         trainer = TrainHandler(args)
 
         if args.gpu:
@@ -44,15 +66,24 @@ if __name__ == "__main__":
                 Log.error(torch.cuda.device(i))
                 Log.error(torch.cuda.get_device_name(i))
 
-        Log.time(key="setup", value=(timeit.default_timer() - start))
+        if args.is_main_process:
+            Log.time(key="setup", value=(timeit.default_timer() - start))
         for epoch in range(trainer.model_epoch, args.epoch):
             epoch_start = timeit.default_timer()
 
-            Log.debug("")
-            Log.print('**** Epoch %d/%s %s ****' % (epoch, args.epoch, args.id))
+            if args.is_main_process:
+                Log.debug("")
+                Log.print('**** Epoch %d/%s %s ****' % (epoch, args.epoch, args.id))
+
+            maybe_freeze_backbone(args, trainer.model, epoch=epoch)
+            if getattr(trainer, "train_sampler", None) is not None:
+                trainer.train_sampler.set_epoch(epoch)
 
             ###### TRAIN #######
-            for i, data in tqdm(enumerate(trainer.loader), total=len(trainer.loader), desc="Train %s" % args.id):
+            pbar = tqdm(enumerate(trainer.loader), total=len(trainer.loader), desc="Train %s" % args.id,
+                        disable=not args.is_main_process)
+            
+            for i, data in pbar:
                 try:
                     images, grid_tensor, fileinfo, duplicate_info, params = data
                     for j, f in enumerate(fileinfo):
@@ -60,33 +91,48 @@ if __name__ == "__main__":
                         for k, v in params.items():
                             trainer.dataset.params_per_file[f].update({k: v[j].item()})
 
-                    Log.debug("Iteration %d" % i)
-                    # if epoch == 1:
                     inference_start = timeit.default_timer()
-                    _, preds = trainer(fileinfo, images, grid_tensor, epoch=epoch, image_idx_in_batch=i,
-                                       first_run=(i == 0))
-                    # if epoch == 1:
+                    
+                    # 2. [중요] trainer에서 loss와 preds를 받습니다.
+                    # (trainer.py에서 return sum_loss.detach().item(), outputs 로 수정했을 때 기준)
+                    batch_loss, preds = trainer(fileinfo, images, grid_tensor, epoch=epoch, image_idx_in_batch=i,
+                                               first_run=(i == 0), is_train=True)
+                    # --- [스마트 분기 처리] 튜플이면 0번째(geom)만 쓰고, 아니면 통째로 씁니다 ---
+                    if isinstance(preds, tuple):
+                        eval_preds = preds[0]
+                    else:
+                        eval_preds = preds
+                    # -----------------------------------------------------------
+                    
+                    # # --- [추가/수정된 부분] 튜플을 풀어서 다시 하나로 합칩니다 ---
+                    # geom_preds, embed_preds = preds
+                    # combined_preds = torch.cat([geom_preds, embed_preds], dim=-1)
+                    # # -----------------------------------------------------------
+                    
+                    # 3. 실시간 Loss를 게이지 옆에 표시합니다.
+                    pbar.set_postfix({'loss': f'{batch_loss:.4f}'})
+
                     Log.time(key="infer", value=timeit.default_timer() - inference_start)
 
-                    Log.debug("Training step finished..")
-
                     num_duplicates = int(sum(duplicate_info["total_duplicates_in_image"]).item())
-                    trainer.on_images_finished(preds=preds.detach().cpu(), grid_tensor=grid_tensor, epoch=epoch,
-                                               filenames=fileinfo, images=images, is_train=True,
-                                               num_duplicates=num_duplicates)
+                    if args.is_main_process:
+                        trainer.on_images_finished(preds=eval_preds.detach().cpu(), grid_tensor=grid_tensor, epoch=epoch,
+                                                   filenames=fileinfo, images=images, is_train=True,
+                                                   num_duplicates=num_duplicates)
 
-                    Log.debug("---- Iteration done i=%d ----" % i)
                 except (Exception, BaseException) as e:
                     Log.error("Error with file %s, epoch %d, iteration %d" % (str(fileinfo), epoch, i))
                     raise e
                 Log.time(key="train_batch", value=timeit.default_timer() - epoch_start)
-            trainer.on_train_epoch_finished(epoch, fileinfo, images, preds=preds.detach(), grid_tensors=grid_tensor)
-
-            Log.time(key="train_epoch", value=timeit.default_timer() - epoch_start)
-            Log.debug("Training done epoch %d" % epoch)
+            if trainer.scheduler is not None and not getattr(args, "scheduler_step_per_batch", True):
+                trainer.scheduler.step()
+            if args.is_main_process:
+                trainer.on_train_epoch_finished(epoch, fileinfo, images, preds=eval_preds.detach(), grid_tensors=grid_tensor)
+                Log.time(key="train_epoch", value=timeit.default_timer() - epoch_start)
+                Log.debug("Training done epoch %d" % epoch)
 
             ###### EVAL #######
-            if trainer.is_time_for_val(epoch):
+            if trainer.is_time_for_val(epoch) and args.is_main_process:
                 Log.debug("")
                 Log.print('**** EPOCH %d EVALUATION %s ****' % (epoch, args.id))
                 with torch.no_grad():
@@ -101,11 +147,23 @@ if __name__ == "__main__":
 
                         _, preds = trainer(fileinfo, images, grid_tensor, epoch=epoch, image_idx_in_batch=i,
                                            is_train=False)
+                        # --- [스마트 분기 처리] 튜플이면 0번째(geom)만 쓰고, 아니면 통째로 씁니다 ---
+                        if isinstance(preds, tuple):
+                            eval_preds = preds[0]
+                        else:
+                            eval_preds = preds
+                        # -----------------------------------------------------------
+                        # # --- [추가/수정된 부분] 튜플을 풀어서 다시 하나로 합칩니다 ---
+                        # geom_preds, embed_preds = preds
+                        # combined_preds = torch.cat([geom_preds, embed_preds], dim=-1)
+                        # # -----------------------------------------------------------
 
                         num_duplicates = int(sum(duplicate_info["total_duplicates_in_image"]).item())
-                        trainer.on_images_finished(preds=preds.detach().cpu(), grid_tensor=grid_tensor, epoch=epoch,
+                        # 여기도 preds.detach()를 combined_preds.detach()로 바꿉니다!
+                        trainer.on_images_finished(preds=eval_preds.detach().cpu(), grid_tensor=grid_tensor, epoch=epoch,
                                                    filenames=fileinfo, images=images, is_train=False,
                                                    num_duplicates=num_duplicates)
+
                         Log.time(key="eval_batch", value=timeit.default_timer() - eval_batch_time)
                 trainer.on_val_epoch_finished(epoch)
                 Log.time(key="eval_epoch_finished", value=timeit.default_timer() - eval_batch_time)
@@ -114,11 +172,17 @@ if __name__ == "__main__":
                     break
 
             # if epoch == 1 or epoch == args.eval_iteration:
-            Log.time(key="epoch", value=timeit.default_timer() - epoch_start)
+            if args.is_main_process:
+                Log.time(key="epoch", value=timeit.default_timer() - epoch_start)
 
         finish_start = timeit.default_timer()
-        trainer.on_training_finished(epoch=epoch, do_nms=args.nms)
-        Log.time(key="finish", value=timeit.default_timer() - finish_start)
+        if args.is_main_process:
+            trainer.on_training_finished(epoch=epoch, do_nms=args.nms)
+            Log.time(key="finish", value=timeit.default_timer() - finish_start)
+        if args.distributed:
+            torch.distributed.destroy_process_group()
     except (Exception, BaseException) as e:
+        if "args" in locals() and getattr(args, "distributed", False) and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
         Log.finish()
         raise e

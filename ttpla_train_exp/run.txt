@@ -1,0 +1,140 @@
+# YOLinO TTPLA run commands used in this chat
+
+## 1) ConvNeXt baseline (immediately before 0429darknet)
+cd /home/work/caps_drone/yolino/YOLinO/ttpla_train_exp && \
+DATASET_TTPLA=/home/work/caps_drone/yolino/TTPLA_YOLinO_Dataset_30p \
+PYTHONPATH=/home/work/caps_drone/yolino/YOLinO/src \
+YOLINO_IGNORE_DIRTY=true \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+/home/work/caps_drone/yolino/venv/bin/python -m torch.distributed.run --standalone --nproc_per_node=4 \
+/home/work/caps_drone/yolino/YOLinO/src/yolino/train.py -c params.yaml \
+--root /home/work/caps_drone/yolino/YOLinO \
+--dvc /home/work/caps_drone/yolino/YOLinO/ttpla_train_exp \
+--log_dir ttpla_convnext_fpn_p3 --gpu \
+--run_name 0428scale32 --scale 32 --head_level P4 \
+--amp false --loading_workers 4 --retrain
+
+
+## 2) Darknet + FPN (0429darknet, restart with explicit rendezvous port)
+cd /home/work/caps_drone/yolino/YOLinO/ttpla_train_exp && \
+DATASET_TTPLA=/home/work/caps_drone/yolino/TTPLA_YOLinO_Dataset_30p \
+PYTHONPATH=/home/work/caps_drone/yolino/YOLinO/src \
+YOLINO_IGNORE_DIRTY=true \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+/home/work/caps_drone/yolino/venv/bin/python -m torch.distributed.run \
+--rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29555 --rdzv_id=ttpla0429darknet \
+--nproc_per_node=4 \
+/home/work/caps_drone/yolino/YOLinO/src/yolino/train.py -c params.yaml \
+--root /home/work/caps_drone/yolino/YOLinO \
+--dvc /home/work/caps_drone/yolino/YOLinO/ttpla_train_exp \
+--log_dir ttpla_convnext_fpn_p3 --gpu \
+--run_name 0429darknet --backbone darknet \
+--darknet_cfg /home/work/caps_drone/yolino/YOLinO/src/yolino/model/cfg/darknet19_448_d2.cfg \
+--scale 32 --head_level P4 --amp false --loading_workers 4 --retrain
+
+
+## 3) Darknet + FPN (Phase 1A keep, confidence behavior tuning only)
+# Purpose:
+# - Keep backbone-comparison setting identical to 0429darknet (Darknet+FPN, scale=32, head=P4, 4GPU DDP).
+# - Change ONLY confidence-related knobs for all-negative-collapse mitigation.
+# Changed vs section (2):
+# - --conf_match_weight 5,1   (was effectively 1,10 in current run)
+# - --confidence 0.3          (was 0.6)
+# Kept fixed for fair comparison:
+# - dataset path, backbone/cfg, scale/head level, amp, workers, optimizer/loss defaults in params.yaml.
+# NOTE:
+# - Use a distinct run_name to avoid mixing TensorBoard curves with the previous 0429darknet run.
+cd /home/work/caps_drone/yolino/YOLinO/ttpla_train_exp && \
+DATASET_TTPLA=/home/work/caps_drone/yolino/TTPLA_YOLinO_Dataset_30p \
+PYTHONPATH=/home/work/caps_drone/yolino/YOLinO/src \
+YOLINO_IGNORE_DIRTY=true \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+/home/work/caps_drone/yolino/venv/bin/python -m torch.distributed.run \
+--rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29556 --rdzv_id=ttpla0429darknet_conf \
+--nproc_per_node=4 \
+/home/work/caps_drone/yolino/YOLinO/src/yolino/train.py -c params.yaml \
+--root /home/work/caps_drone/yolino/YOLinO \
+--dvc /home/work/caps_drone/yolino/YOLinO/ttpla_train_exp \
+--log_dir ttpla_convnext_fpn_p3 --gpu \
+--run_name 0429darknet_conf031_cmw51 --backbone darknet \
+--darknet_cfg /home/work/caps_drone/yolino/YOLinO/src/yolino/model/cfg/darknet19_448_d2.cfg \
+--scale 32 --head_level P4 --amp false --loading_workers 4 --retrain \
+--conf_match_weight 5,1 --confidence 0.3
+
+
+## 4) Darknet + FPN with original 4K dataset (memory stress check)
+# Purpose:
+# - Keep 0429darknet training setup identical and only switch dataset path to original-size data.
+# - Validate whether GPU memory / DDP stability changes with the original 4K source dataset.
+# - This is a direct execution command (no model code changes required).
+#
+# Dataset used:
+# - /home/work/caps_drone/yolino/data_original_size_v1
+#   (contains data_original_size/)
+#
+# Notes:
+# - Keep run_name separated to avoid TensorBoard/log mixing with other 0429 runs.
+# - If this path is not accepted by loader on first attempt, try:
+#   DATASET_TTPLA=/home/work/caps_drone/yolino/data_original_size_v1/data_original_size
+cd /home/work/caps_drone/yolino/YOLinO/ttpla_train_exp && \
+DATASET_TTPLA=/home/work/caps_drone/yolino/data_original_size_v1 \
+PYTHONPATH=/home/work/caps_drone/yolino/YOLinO/src \
+YOLINO_IGNORE_DIRTY=true \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+/home/work/caps_drone/yolino/venv/bin/python -m torch.distributed.run \
+--rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29557 --rdzv_id=ttpla0429darknet_4k \
+--nproc_per_node=4 \
+/home/work/caps_drone/yolino/YOLinO/src/yolino/train.py -c params.yaml \
+--root /home/work/caps_drone/yolino/YOLinO \
+--dvc /home/work/caps_drone/yolino/YOLinO/ttpla_train_exp \
+--log_dir ttpla_convnext_fpn_p3 --gpu \
+--run_name 0429darknet_4k_origdata --backbone darknet \
+--darknet_cfg /home/work/caps_drone/yolino/YOLinO/src/yolino/model/cfg/darknet19_448_d2.cfg \
+--scale 32 --head_level P4 --amp false --loading_workers 4 --retrain
+
+
+## 5) NEW baseline for downsampled dataset (fixed weights)
+# Dataset alias prepared:
+# - /home/work/caps_drone/yolino/ttpla_yolino_dataset_down -> ttpla_yolino_dataset_downsample
+#
+# Unified parameters for baseline matching ablation:
+# - dataset: /home/work/caps_drone/yolino/ttpla_yolino_dataset_down
+# - backbone: darknet
+# - use_fpn: false
+# - scale/head_level: 32 / P4
+# - img_height: 576  (=> 576x1024 aspect preserved input)
+# - loss (geom,conf): norm_mean,mse_mean  (focal off)
+# - loss_weight_strategy: fixed
+# - weights: 2,1
+# - conf_match_weight: 5,1
+# - confidence threshold: 0.3
+# - epoch: 50
+# - amp: false
+# - loading_workers: 4
+#
+# Shared base args (append each experiment-specific tail below):
+cd /home/work/caps_drone/yolino/YOLinO/ttpla_train_exp && \
+DATASET_TTPLA=/home/work/caps_drone/yolino/ttpla_yolino_dataset_down \
+PYTHONPATH=/home/work/caps_drone/yolino/YOLinO/src \
+YOLINO_IGNORE_DIRTY=true \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+/home/work/caps_drone/yolino/venv/bin/python -m torch.distributed.run \
+--rdzv_backend=c10d --nproc_per_node=4 \
+/home/work/caps_drone/yolino/YOLinO/src/yolino/train.py -c params.yaml \
+--root /home/work/caps_drone/yolino/YOLinO \
+--dvc /home/work/caps_drone/yolino/YOLinO/ttpla_train_exp \
+--log_dir ttpla_convnext_fpn_p3 --gpu --retrain \
+--backbone darknet --scale 32 --head_level P4 --use_fpn false --amp false --loading_workers 4 \
+--img_height 576 \
+--epoch 50 --training_variables geom,confidence --activations linear,sigmoid \
+--loss_weight_strategy fixed --weights 2,1 --conf_match_weight 5,1 --confidence 0.3
+
+# 5-1) Baseline (strict hard OFF = existing conf-gated bipartite)
+--rdzv_endpoint=127.0.0.1:29610 --rdzv_id=base_match_conf_gated_dn_nofpn \
+--run_name base_ds_dn_nofpn_conf_gated --loss norm_mean,mse_mean \
+--loss_hard_matching true --match_by_conf_first true --use_conf_in_loss_matching false
+
+# 5-2) Compare (strict hard ON = confidence-free assignment)
+--rdzv_endpoint=127.0.0.1:29611 --rdzv_id=base_match_strict_hard_dn_nofpn \
+--run_name base_ds_dn_nofpn_strict_hard --loss norm_mean,mse_mean \
+--loss_hard_matching true --match_by_conf_first false --use_conf_in_loss_matching false

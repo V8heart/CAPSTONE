@@ -40,9 +40,12 @@ from yolino.utils.enums import TaskType, Logger, AnchorDistribution, LINE, Ancho
 from yolino.utils.gpu import getCuda
 from yolino.utils.logger import Log
 from yolino.utils.paths import Paths
+from yolino.utils.enums import Variables
 
 
 def __push_commit__(root, ignore_dirty=False):
+    if os.environ.get("YOLINO_IGNORE_DIRTY", "").lower() in ("1", "true", "yes"):
+        ignore_dirty = True
     import git
     repo = git.Repo(root, search_parent_directories=True)
 
@@ -148,6 +151,31 @@ def general_setup(name, config_file="params.yaml", ignore_cmd_args=False, altern
     else:
         args = preloaded_argparse
 
+    # ------------------------------------------------------------
+    # Option A: INSTANCE는 geom head에서 제거하고 embed head가 독점
+    # - args.training_variables/activations/loss/weights 는 "geom 전용"으로 축소
+    # - 제거된 INSTANCE 설정은 args.instance_* 로 따로 보관
+    # ------------------------------------------------------------
+    args.training_variables_all = list(args.training_variables)
+    args.train_instance_embedding = False
+    args.instance_embedding_loss = None
+    args.instance_embedding_activation = None
+    args.instance_embedding_weight = None
+    if Variables.INSTANCE in args.training_variables:
+        inst_idx = args.training_variables.index(Variables.INSTANCE)
+        args.train_instance_embedding = True
+        args.instance_embedding_loss = args.loss[inst_idx]
+        args.instance_embedding_activation = args.activations[inst_idx]
+        if args.weights is not None:
+            args.instance_embedding_weight = args.weights[inst_idx]
+
+        # remove INSTANCE from geom training spec
+        args.training_variables = [v for i, v in enumerate(args.training_variables) if i != inst_idx]
+        args.loss = [v for i, v in enumerate(args.loss) if i != inst_idx]
+        args.activations = [v for i, v in enumerate(args.activations) if i != inst_idx]
+        if args.weights is not None:
+            args.weights = [v for i, v in enumerate(args.weights) if i != inst_idx]
+
     if "SLURM_JOB_ID" in os.environ:
         args.slurm_job = os.environ["SLURM_JOB_ID"]
 
@@ -214,14 +242,18 @@ def general_setup(name, config_file="params.yaml", ignore_cmd_args=False, altern
 
 
 def __set_hash__(args):
-    if True:
-        from datetime import datetime
-        now = datetime.now()
-        args.id = now.strftime("%y-%b-%d_%H-%M-%S-%f")
+    from datetime import datetime
+    now = datetime.now()
+    timestamp = now.strftime("%y-%b-%d_%H-%M-%S-%f")
+
+    run_name = getattr(args, "run_name", None)
+    if run_name:
+        # Sanitize: replace spaces with underscores, strip unsafe chars
+        safe_name = run_name.strip().replace(" ", "_")
+        args.id = safe_name
+        Log.info(f"Run name set to '{args.id}' (outputs will be stored under this name)")
     else:
-        hash = hashlib.sha1()
-        hash.update(str(time.time()).encode('utf-8'))
-        args.id = hash.hexdigest()[:10]
+        args.id = timestamp
 
 
 def __set_paths__(args):

@@ -149,6 +149,11 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
     log_group.add_argument("--resume_log", action="store_true", help="Resume logging jobs if available.\n"
                                                                      "Wandb: https://docs.wandb.ai/ref/python/init resume='auto'.\n"
                                                                      "ClearML: https://clear.ml/docs/latest/docs/references/sdk/task/#taskinit continue_last_task=True.")
+    log_group.add_argument("--run_name", type=str, default=None,
+                           help="Custom name for this run. All outputs (checkpoints, debug images, "
+                                "TensorBoard, cmd log) are stored under this name instead of an "
+                                "auto-generated timestamp. E.g. --run_name ep11_embed_v1. "
+                                "If not set, a timestamp is used automatically.")
     # ------ Experiment Params ---------
     file_group.add_argument("--log_dir", type=str, required=True,
                             help="Name of the experiment e.g. tus_po_8p_dn19_up. Should also be the branch name and the folder name.")
@@ -161,6 +166,13 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
     model_group = parser.add_argument_group("Model")
     model_group.add_argument("--model", type=Network, choices=list(Network), default=Network.YOLO_CLASS,
                              help="Provide network model name")
+    model_group.add_argument("--backbone", type=str, default="convnext",
+                             choices=["convnext", "darknet"],
+                             help="Backbone family for YolinoNet. "
+                                  "'convnext' = ConvNeXt-Tiny + FPN (default). "
+                                  "'darknet'  = Darknet-19 (cfg via --darknet_cfg, optional dilation) + FPN. "
+                                  "Both expose `backbone.body.*` so layer-wise LR groups "
+                                  "(`--lr_backbone/--lr_fpn/...`) and freeze logic behave identically.")
     model_group.add_argument("--darknet_cfg", type=str, default="model/cfg/darknet19_448_d2.cfg",
                              help="Path to the darknet config. Will be appended to the root path.")
     model_group.add_argument("--darknet_weights", type=str, default="model/cfg/darknet19_448.weights",
@@ -168,6 +180,36 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
     model_group.add_argument("--linerep", type=LINE, choices=list(LINE), required=True,
                              help="Provide the line representation.")
     add_num_predictors(model_group)
+    model_group.add_argument("--embed_dim", type=int, default=8,
+                             help="Embedding head output channels per predictor (D).")
+    model_group.add_argument(
+        "--feature_refine", type=str, default="sa_embed_only",
+        choices=["none", "sa_embed_only", "sa_shared", "cbam_shared"],
+        help="Trunk feature refinement before heads: none | sa_embed_only (default, SA only on embed path) | "
+             "sa_shared (SA on shared map → both heads) | cbam_shared (CBAM on shared map → both heads).")
+    model_group.add_argument("--cbam_reduction_ratio", type=int, default=16,
+                             help="CBAM channel MLP reduction ratio when feature_refine=cbam_shared.")
+    # ----- ConvNeXt + FPN backbone options -----
+    model_group.add_argument("--fpn_out_channels", type=int, default=256,
+                             help="FPN lateral/smooth conv output channels. Heads consume this directly. "
+                                  "Default 256.")
+    model_group.add_argument("--head_level", type=str, default="P3",
+                             choices=["P2", "P3", "P4"],
+                             help="FPN level fed to geometry/embedding heads. "
+                                  "P2=stride 8, P3=stride 16, P4=stride 32. "
+                                  "MUST match --scale (P2:8, P3:16, P4:32).")
+    model_group.add_argument("--backbone_pretrained", action=ParseBool, default=True,
+                             help="Load ImageNet-pretrained ConvNeXt-Tiny weights (True/False).")
+    model_group.add_argument("--fpn_upsample_mode", type=str, default="nearest",
+                             choices=["nearest", "bilinear"],
+                             help="Interpolation mode used inside the FPN top-down path.")
+    model_group.add_argument("--use_fpn", action=ParseBool, default=True,
+                             help="If true, use top-down FPN fusion. "
+                                  "If false, skip top-down fusion and use per-level projected backbone features "
+                                  "(same P2/P3/P4 strides, no cross-level fusion).")
+    model_group.add_argument("--backbone_freeze_epochs", type=int, default=0,
+                             help="Freeze the ConvNeXt body for the first N epochs (only FPN+heads train). "
+                                  "0 disables freezing. Useful to stabilize new heads on a pretrained backbone.")
     model_group.add_argument("--activations", type=str, required=True,
                              help="Provide the activation for each block in the training variables. Choose from %s" % [
                                  a.value for a in ACTIVATION],
@@ -203,6 +245,20 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
                              help="Speciy Optimizer")
     train_group.add_argument("--scheduler", type=Scheduler, choices=list(Scheduler), default=Scheduler.NONE,
                              help="Specify Scheduler for the learning rate")
+    train_group.add_argument("--warmup_epochs", type=int, default=0,
+                             help="Warmup length in epochs for warmup_cosine scheduler.")
+    train_group.add_argument("--min_lr_ratio", type=float, default=0.05,
+                             help="Final LR ratio for cosine schedules. "
+                                  "effective_min_lr = base_lr * min_lr_ratio.")
+    train_group.add_argument("--scheduler_step_per_batch", action=ParseBool, default=True,
+                             help="If true, step scheduler every optimizer step (recommended for warmup_cosine).")
+    train_group.add_argument("--ddp_find_unused_parameters", action=ParseBool, default=False,
+                             help="DDP option for models with conditionally unused params. "
+                                  "Keep False for best performance unless needed.")
+    train_group.add_argument("--amp", action=ParseBool, default=True,
+                             help="Enable mixed precision training (torch.cuda.amp) for stability/performance.")
+    train_group.add_argument("--grad_clip_norm", type=float, default=0.0,
+                             help="If >0, clip gradient norm to this value before optimizer step.")
     train_group.add_argument("--patience", type=int, default=5,
                              help="Number of validation epochs to wait for early convergence. "
                                   "If the last p epochs are worse than a previous one, we stop.")
@@ -212,6 +268,21 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
     train_group.add_argument("--earliest_stop", type=int, default=5,
                              help="Minimum number of epochs to run before appyl early stopping criteria.")
     train_group.add_argument("--learning_rate", required=True, type=float, help="The learning rate for the training")
+    # Optional: layer-wise LR for decoupled heads (uses param_groups)
+    train_group.add_argument("--lr_backbone", required=False, type=float, default=None,
+                             help="Optional LR for the ConvNeXt backbone body (pretrained features). "
+                                  "Recommend a small value (e.g. 1e-5..5e-5). "
+                                  "If unset, falls back to --learning_rate.")
+    train_group.add_argument("--lr_fpn", required=False, type=float, default=None,
+                             help="Optional LR for FPN (lateral/smooth convs, non-pretrained). "
+                                  "Recommend a moderate value (e.g. 1e-4..5e-4). "
+                                  "If unset, falls back to --learning_rate.")
+    train_group.add_argument("--lr_geom", required=False, type=float, default=None,
+                             help="Optional LR for geometry head (yolo 1x1 conv). "
+                                  "If unset, falls back to --learning_rate.")
+    train_group.add_argument("--lr_embed", required=False, type=float, default=None,
+                             help="Optional LR for embedding head (attention/cbam + embed_head). "
+                                  "If unset, falls back to --learning_rate.")
     # Loss
     loss_group = parser.add_argument_group("Loss")
     loss_group.add_argument("--loss", type=str, required=True,
@@ -234,12 +305,26 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
     loss_group.add_argument("--match_by_conf_first", action=ParseBool,
                             help="Apply two-stage matching. 1. Only match predictions with confidence > --confidence. "
                                  "2. Match all remaining. This only affects the loss matching, not the evaluation.")
+    loss_group.add_argument("--loss_hard_matching", action=ParseBool, default=True,
+                            help="If true, use Hungarian bipartite matching for loss assignment. "
+                                 "If false, skip matching and keep predictor order as-is for loss.")
     loss_group.add_argument("--use_conf_in_loss_matching", action=ParseBool,
                             help="Use the confidence variable in matching line segments for the loss. "
                                  "Only for --anchors=none.")
     loss_group.add_argument("--association_metric", type=Distance, choices=list(Distance), default=Distance.EUCLIDEAN,
                             help="Specify metric to associate two line segments geometrically. "
                                  "Will determine the responsibility in the loss function.", required=True)
+    # Optional: discriminative embedding hyperparameters
+    loss_group.add_argument("--embedding_delta_v", type=float, default=0.5,
+                            help="Discriminative embedding loss: pull margin delta_v")
+    loss_group.add_argument("--embedding_delta_d", type=float, default=3.0,
+                            help="Discriminative embedding loss: push margin delta_d")
+    loss_group.add_argument("--embedding_lambda_reg", type=float, default=0.0,
+                            help="Discriminative loss: weight for L_reg (centroid L2 toward 0) on pure embeddings; 0=off.")
+    loss_group.add_argument("--embedding_concat_geom_dims", type=int, default=0,
+                            help="If >0, concat first N GT geometry channels (detached) to embedding vectors for pull/push only.")
+    loss_group.add_argument("--embedding_loss_warmup_epochs", type=int, default=0,
+                            help="Linearly scale discriminative embedding loss from 0→1 over this many epochs (0=off).")
     # Anchors
     anchor_group = parser.add_argument_group("Anchors")
     add_anchors(anchor_group)

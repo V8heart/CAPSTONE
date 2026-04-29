@@ -73,6 +73,7 @@ class Dataset(BaseEnum):
     CULANE = "culane"
     CIFAR = "cifar"
     CALTECH = "caltech"
+    TTPLA = "ttpla"
 
 
 class CoordinateSystem(BaseEnum):
@@ -91,6 +92,8 @@ class Augmentation(BaseEnum):
     NORM = "normalize"
     JITTER = "jitter"
     ERASING = "erasing"
+    BLUR = "blur"
+    NOISE = "noise"
 
 
 class LOSS(BaseEnum):
@@ -98,10 +101,16 @@ class LOSS(BaseEnum):
     CROSS_ENTROPY_MEAN = "ce"
     BINARY_CROSS_ENTROPY_SUM = "bce_sum"
     BINARY_CROSS_ENTROPY_MEAN = "bce_mean"
+    FOCAL_MEAN = "focal_mean"
     MSE_MEAN = "mse_mean"
     MSE_SUM = "mse_sum"
     NORM_MEAN = "norm_mean"
     NORM_SUM = "norm_sum"
+    # ---------------------------------------------------------
+    # [신규 추가] 우리가 loss.py에 추가한 로스들을 시스템에 등록
+    # ---------------------------------------------------------
+    DISCRIMINATIVE_EMBEDDING = "discriminative_embedding"
+    TANGENT_COSINE = "tangent_cosine"
 
 
 class LossWeighting(BaseEnum):
@@ -146,6 +155,8 @@ class Metric(BaseEnum):
 
 class Scheduler(BaseEnum):
     NONE = "none"
+    COSINE = "cosine"
+    WARMUP_COSINE = "warmup_cosine"
 
 
 class Optimizer(BaseEnum):

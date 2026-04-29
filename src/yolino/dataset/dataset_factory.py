@@ -25,6 +25,7 @@ from yolino.dataset.argoverse20_pytorch import Argoverse2Dataset
 from yolino.dataset.dataset_base import DatasetInfo
 from yolino.utils.enums import Dataset
 from yolino.utils.logger import Log
+from yolino.dataset.ttpla import TTPLADataset
 
 
 class DatasetFactory:
@@ -38,6 +39,7 @@ class DatasetFactory:
         Dataset.CALTECH: CaltechDataSet,
         Dataset.TUSIMPLE: TusimpleDataset,
         Dataset.ARGOVERSE2: Argoverse2Dataset,
+        Dataset.TTPLA: TTPLADataset,
     }
 
     @classmethod
@@ -83,7 +85,7 @@ class DatasetFactory:
 
     @classmethod
     def get(self, dataset_enum: Dataset, only_available, split, args, shuffle, augment, load_only_labels=False,
-            show=False, load_full=False, ignore_duplicates=False, store_lines=False) -> (DatasetInfo, DataLoader):
+            show=False, load_full=False, ignore_duplicates=False, store_lines=False, sampler=None) -> (DatasetInfo, DataLoader):
         if dataset_enum in DatasetFactory.datasets:
             dataset_class = DatasetFactory.datasets[dataset_enum]
             dataset = dataset_class(split=split, args=args, augment=augment, load_only_labels=load_only_labels,
@@ -92,7 +94,9 @@ class DatasetFactory:
 
             if dataset.is_available():
                 Log.debug("Load data from %s with batch=%d" % (dataset_enum, args.batch_size))
-                loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, drop_last=True,
+                loader = DataLoader(dataset, batch_size=args.batch_size,
+                                    shuffle=(shuffle if sampler is None else False),
+                                    sampler=sampler, drop_last=True,
                                     num_workers=args.loading_workers, pin_memory=args.gpu)
                 return dataset, loader
             else:

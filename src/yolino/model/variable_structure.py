@@ -39,7 +39,7 @@ class VariableStructure(dict):
         dict_data = {
             Variables.GEOMETRY: self.line_representation.num_params,  # Regression
             Variables.CLASS: num_classes,  # Classification
-            Variables.INSTANCE: 0,  # Classification !?
+            Variables.INSTANCE: 4,  # Classification !?
             Variables.FOLLOWER: 0,  # Classification
             Variables.POSITION_IN_LINE: 0,  # Classification
             Variables.CONF: num_conf,  # Regression

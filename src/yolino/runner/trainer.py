@@ -19,9 +19,12 @@
 # ----------------------------- COPYRIGHT ------------------------------------ #
 # ---------------------------------------------------------------------------- #
 import os
+import math
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 from yolino.dataset.dataset_factory import DatasetFactory
@@ -51,23 +54,61 @@ class TrainHandler:
         self.val_dataset, self.val_loader = DatasetFactory.get(args.dataset, only_available=True, split="val",
                                                                args=args, shuffle=False, augment=False,
                                                                ignore_duplicates=False)
+        self.train_sampler = None
+        self.val_sampler = None
+        if getattr(args, "distributed", False):
+            self.train_sampler = DistributedSampler(self.dataset, num_replicas=args.world_size,
+                                                    rank=args.rank, shuffle=True, drop_last=True)
+            self.val_sampler = DistributedSampler(self.val_dataset, num_replicas=args.world_size,
+                                                  rank=args.rank, shuffle=False, drop_last=True)
+            self.loader = DataLoader(self.dataset, batch_size=args.batch_size, sampler=self.train_sampler,
+                                     shuffle=False, drop_last=True, num_workers=args.loading_workers,
+                                     pin_memory=args.gpu)
+            self.val_loader = DataLoader(self.val_dataset, batch_size=args.batch_size, sampler=self.val_sampler,
+                                         shuffle=False, drop_last=True, num_workers=args.loading_workers,
+                                         pin_memory=args.gpu)
+        # Used by LR schedulers (especially warmup+cosine with step-wise updates).
+        self.args.iters_per_epoch = len(self.loader)
+        self.args.total_train_steps = max(1, (int(args.epoch) * int(self.args.iters_per_epoch)))
         Log.upload_params({"train_imgs": len(self.dataset), "val_imgs": len(self.val_dataset),
                            "dataset_path": self.dataset.dataset_path})
 
         # model
         self.model, scheduler_checkpoint, self.model_epoch = load_checkpoint(args, self.dataset.coords)
+        if getattr(args, "distributed", False):
+            self.model = torch.nn.parallel.DistributedDataParallel(
+                self.model,
+                device_ids=[args.local_rank] if args.gpu else None,
+                output_device=args.local_rank if args.gpu else None,
+                find_unused_parameters=bool(getattr(args, "ddp_find_unused_parameters", False)),
+            )
 
-        num_train_vars = len(self.dataset.coords.train_vars())
+        # geom head terms (+ optional instance embedding term)
+        num_geom_terms = len(self.dataset.coords.train_vars())
+        num_train_vars = num_geom_terms + (1 if getattr(args, "train_instance_embedding", False) else 0)
         num_cells = np.prod(args.grid_shape)
 
         # Argoverse has (per scale) 32: 106; 16: 201; 8: 389 line segments in an image (on average)
         num_lines = 106 if args.scale == 32 else (201 if args.scale == 16 else 389)
 
-        activation_is_exp = [get_activations(args.activations, coords=self.dataset.coords,
-                                             linerep=self.dataset.coords.line_representation.enum).activations[
-                                 i].is_exp() for i in range(num_train_vars)]
+        activation_is_exp = [
+            get_activations(args.activations, coords=self.dataset.coords,
+                            linerep=self.dataset.coords.line_representation.enum).activations[i].is_exp()
+            for i in range(num_geom_terms)
+        ]
+        if getattr(args, "train_instance_embedding", False):
+            # embedding loss는 exp-activation weight scheme에 묶지 않음 (learned weighting에서도 안정적)
+            activation_is_exp.append(False)
+        init_weights = args.weights
+        if init_weights is None:
+            init_weights = [1] * num_geom_terms
+        else:
+            init_weights = list(init_weights)
+        if getattr(args, "train_instance_embedding", False):
+            init_weights.append(getattr(args, "instance_embedding_weight", None) or 1)
+
         self.loss_weights = self.__init_loss_weights__(num_train_vars=num_train_vars,
-                                                       cuda=self.args.cuda, init_weights=args.weights,
+                                                       cuda=self.args.cuda, init_weights=init_weights,
                                                        loss_weighting=args.loss_weight_strategy,
                                                        average_num_lines=num_lines, num_cells=int(num_cells),
                                                        num_preds=args.num_predictors, is_exponential=activation_is_exp)
@@ -86,6 +127,8 @@ class TrainHandler:
                                  conf_weights=self.conf_loss_weights)
         self.optimizer, self.scheduler = get_optimizer(args, net=self.forward.model,
                                                        loss_weights=[*self.loss_weights, *self.conf_loss_weights])
+        self.scaler = torch.cuda.amp.GradScaler(enabled=bool(getattr(self.args, "amp", True) and self.args.gpu))
+        self.debug_anomaly = os.environ.get("YOLINO_DEBUG_ANOMALY", "").lower() in ("1", "true", "yes")
         Log.gradients(model=self.model)
 
         self.evaluator = Evaluator(args, coords=self.dataset.coords, prepare_forward=False,
@@ -97,9 +140,12 @@ class TrainHandler:
         self.best_epoch = -1
         self.last_loss = torch.inf
 
+        report_vars = getattr(self.args, "training_variables_all", self.args.training_variables)
+        if getattr(self.args, "train_instance_embedding", False) and Variables.INSTANCE not in report_vars:
+            report_vars = list(report_vars) + [Variables.INSTANCE]
         self.losses = {}
-        self.losses[TRAIN_TAG] = LossContainer(self.args.training_variables, len(self.loader), self.loss_weights)
-        self.losses[VAL_TAG] = LossContainer(self.args.training_variables, len(self.val_loader), self.loss_weights)
+        self.losses[TRAIN_TAG] = LossContainer(report_vars, len(self.loader), self.loss_weights)
+        self.losses[VAL_TAG] = LossContainer(report_vars, len(self.val_loader), self.loss_weights)
 
     @staticmethod
     def __init_loss_weights__(num_train_vars, cuda, loss_weighting: LossWeighting, is_exponential,
@@ -200,45 +246,39 @@ class TrainHandler:
     def __call__(self, filenames, images, grid_tensor, epoch, image_idx_in_batch, is_train=True, first_run=False):
         if is_train:
             self.optimizer.zero_grad()
-
-        outputs = self.forward(images, is_train=is_train, epoch=epoch, first_run=first_run)
+        
+        # 1. 모델이 반환하는 2개의 텐서를 각각 받습니다.
+        use_amp = bool(getattr(self.args, "amp", True) and self.args.gpu)
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            geom_preds, embed_preds = self.forward(images, is_train=is_train, epoch=epoch, first_run=first_run)
 
         if image_idx_in_batch == 0 and epoch == 0:
-            self.on_data_loaded(filenames[0], images[0], grid_tensor[0], outputs[0].detach().cpu(), is_train=is_train)
+            # 시각화/디버깅은 형태(Geometry) 정보만 필요하므로 geom_preds를 넘깁니다.
+            self.on_data_loaded(filenames[0], images[0], grid_tensor[0], geom_preds[0].detach().cpu(), is_train=is_train)
             Log.debug("Data reporting finished..")
 
-        # Loss + Backward
-        if self.args.cuda not in str(outputs.device):
-            Log.warning("Somehow the output of the network was not on %s" % str(self.args.cuda))
-            outputs = outputs.to(self.args.cuda)
-
+        # 2. CUDA(GPU) 디바이스 이동 처리 (outputs 대신 geom과 embed를 명시)
+        if self.args.cuda not in str(geom_preds.device):
+            geom_preds = geom_preds.to(self.args.cuda)
+            embed_preds = embed_preds.to(self.args.cuda)
         if self.args.cuda not in str(grid_tensor.device):
             grid_tensor = grid_tensor.to(self.args.cuda)
 
-        if False:
-            for b in range(len(grid_tensor)):
-                for c in range(len(grid_tensor[b])):
-
-                    col = c % self.args.grid_shape[1]
-                    row = int(c / self.args.grid_shape[1])
-                    for p in torch.where(grid_tensor[b, c, :, 4] > self.args.confidence):
-                        self.dataset.anchors.add_conf_heatmap(row, col, p)
-
-        if False:
-            plt.clf()
-            confs = outputs[:, :, :, 4].detach().flatten().numpy()
-            print(np.histogram(confs, bins=12, range=[-0.1, 1.1])[0])
-            plt.hist(confs, 12, range=[-0.1, 1.1])
-            name = "/tmp/seaborn_conf_hist.png"
-            Log.info("Log to file://%s" % name)
-            plt.savefig(name)
+        # (필요 없는 기존 시각화 블록 False 처리된 부분은 그대로 두거나 삭제하셔도 무방합니다)
 
         loss_weight_dict = {}
+        # Keep defaults so eval can continue even if one batch hits indef/nan handling.
+        losses, mean_losses = {}, {}
+        sum_loss = torch.tensor(float("nan"), device=geom_preds.device)
         try:
-            losses, sum_loss, mean_losses = self.loss(grid_tensor, outputs, epoch=epoch, filenames=filenames,
-                                                      tag=TRAIN_TAG if is_train else VAL_TAG)  # input shape [batch, cells, preds, vars]
+            # 3. 로스 래퍼 함수(self.loss)에 두 텐서를 모두 넘겨줍니다.
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                losses, sum_loss, mean_losses = self.loss(
+                    grid_tensor, geom_preds, embed_preds, epoch=epoch, filenames=filenames,
+                    tag=TRAIN_TAG if is_train else VAL_TAG)
+            self._log_loss_diagnostics(losses, mean_losses, sum_loss, filenames, epoch, image_idx_in_batch)
             if is_train:
-                self.backward(sum_loss)
+                self.backward(sum_loss, epoch=epoch)
 
                 for j, v in enumerate(self.dataset.coords.train_vars()):
                     std_1 = torch.exp(self.loss_weights[j]) ** 0.5
@@ -253,7 +293,7 @@ class TrainHandler:
                                                                 config_losses=losses, i=image_idx_in_batch)
         except (ValueError, NotImplementedError, RuntimeError) as e:
             Log.debug(e)
-            pred_grid, _ = GridFactory.get(torch.unsqueeze(outputs[0].detach().cpu(), dim=0), [],
+            pred_grid, _ = GridFactory.get(torch.unsqueeze(geom_preds[0].detach().cpu(), dim=0), [],
                                            CoordinateSystem.CELL_SPLIT, self.args,
                                            input_coords=self.dataset.coords, threshold=self.args.confidence,
                                            only_train_vars=True, anchors=self.dataset.anchors)
@@ -286,8 +326,8 @@ class TrainHandler:
             Log.error("Something is wrong with these losses: %s. We continue..." % str(e))
             self.losses[TRAIN_TAG if is_train else VAL_TAG].add(epoch, mean_losses=mean_losses, config_losses=losses,
                                                                 i=image_idx_in_batch)
-
-        return images, outputs
+        # sum_loss는 try 블록에서 계산되며, 실패 시 NaN 기본값을 반환합니다.
+        return sum_loss.detach().cpu().item(), (geom_preds, embed_preds)
 
     def on_indef(self, epoch, filenames, exception, batch_index, is_train=True):
         if self.best_mean_loss != np.inf or epoch > 10 or is_train:
@@ -581,26 +621,101 @@ class TrainHandler:
         Log.debug('Finished Training')
         Log.finish()
 
-    def loss(self, grid_tensor, outputs, filenames, epoch, tag="dummy_trainer"):
+    def loss(self, grid_tensor, geom_preds, embed_preds, filenames, epoch, tag="dummy_trainer"):
         """
-
         Args:
-            grid_tensor (torch.tensor):
-                with shape [batch, cells, preds, vars]
-
-            outputs (list):
-                with num_train_vars entries
+            grid_tensor (torch.tensor): [batch, cells, preds, vars]
+            geom_preds (torch.tensor): [batch, cells, preds, num_train_vars]
+            embed_preds (torch.tensor): [batch, cells, preds, embed_dim]
         """
-        losses, sum_loss, mean_losses = self.loss_fct(outputs, grid_tensor, filenames=filenames, epoch=epoch,
-                                                      tag=tag)  # should have (batch, ..., classes)
+        # 앞서 수정한 LossComposition의 __call__ 파라미터에 맞게 3개를 전달합니다.
+        losses, sum_loss, mean_losses = self.loss_fct(geom_preds, embed_preds, grid_tensor, filenames=filenames, epoch=epoch,
+                                                      tag=tag)
         if torch.isnan(sum_loss) or torch.isinf(sum_loss):
             raise ValueError("Loss ran into NaN or infinity")
 
         return losses, sum_loss, mean_losses
 
-    def backward(self, loss):
-        loss.backward()
-        self.optimizer.step()
+    def backward(self, loss, epoch=None):
+        if self.debug_anomaly:
+            with torch.autograd.detect_anomaly():
+                self._backward_impl(loss, epoch=epoch)
+            return
+        self._backward_impl(loss, epoch=epoch)
+
+    def _backward_impl(self, loss, epoch=None):
+        if self.scaler.is_enabled():
+            self.scaler.scale(loss).backward()
+            if getattr(self.args, "grad_clip_norm", 0.0) and self.args.grad_clip_norm > 0:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip_norm)
+            if epoch is not None:
+                self._log_gradient_norms(epoch)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            loss.backward()
+            if getattr(self.args, "grad_clip_norm", 0.0) and self.args.grad_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip_norm)
+            if epoch is not None:
+                self._log_gradient_norms(epoch)
+            self.optimizer.step()
+        if self.scheduler is not None and getattr(self.args, "scheduler_step_per_batch", True):
+            self.scheduler.step()
+
+    def _log_loss_diagnostics(self, losses, mean_losses, sum_loss, filenames, epoch, image_idx_in_batch):
+        def _as_float(v):
+            if isinstance(v, torch.Tensor):
+                if v.numel() == 0:
+                    return float("nan")
+                return float(v.detach().reshape(-1)[0].item())
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return float("nan")
+
+        sum_v = _as_float(sum_loss)
+        if math.isfinite(sum_v):
+            return
+
+        comp = [_as_float(v) for v in losses]
+        comp_mean = [_as_float(v) for v in mean_losses]
+        msg = (
+            "Non-finite sum_loss detected: sum=%s epoch=%s iter=%s files=%s "
+            "components=%s components_finite=%s means=%s means_finite=%s"
+            % (
+                sum_v,
+                epoch,
+                image_idx_in_batch,
+                filenames,
+                comp,
+                [math.isfinite(v) for v in comp],
+                comp_mean,
+                [math.isfinite(v) for v in comp_mean],
+            )
+        )
+        Log.error(msg)
+
+    def _log_gradient_norms(self, epoch):
+        grad_norms = {}
+        for name, param in self.model.named_parameters():
+            if param.grad is not None:
+                norm = param.grad.data.norm(2).item()
+                if "embed_head" in name:
+                    grad_norms.setdefault("embed_head", []).append(norm)
+                elif "attention" in name:
+                    grad_norms.setdefault("attention", []).append(norm)
+                elif "cbam" in name:
+                    grad_norms.setdefault("cbam", []).append(norm)
+                elif "yolo" in name:
+                    grad_norms.setdefault("yolo_head", []).append(norm)
+
+        for group, norms in grad_norms.items():
+            avg_norm = sum(norms) / len(norms) if norms else 0.0
+            max_norm = max(norms) if norms else 0.0
+            Log.scalars(tag=TRAIN_TAG, epoch=epoch,
+                        dict={f"grad_norm/{group}/avg": avg_norm,
+                              f"grad_norm/{group}/max": max_norm})
 
     def is_time_for_val(self, epoch):
         return epoch % self.args.eval_iteration == 0

@@ -77,11 +77,16 @@ def get_model(args, coords):
 def get_from_checkpoint(model, args, load_best):
     checkpoint = get_checkpoint(args, load_best=load_best)
 
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
 
     epoch = checkpoint['epoch']
 
-    args.id = checkpoint['ID']
+    # Keep args.id as the user-specified run_name (or auto-generated timestamp).
+    # Only log the source checkpoint's original ID for reference.
+    source_id = checkpoint.get('ID', 'unknown')
+    if source_id != args.id:
+        Log.info(f"Loaded weights from source run '{source_id}' (epoch {epoch}). "
+                 f"New outputs will be saved under '{args.id}'.")
 
     if "scheduler_state_dict" in checkpoint:
         scheduler_checkpoint = checkpoint['scheduler_state_dict']
@@ -167,11 +172,12 @@ def save_checkpoint(args, model, optimizer, scheduler, epoch, id):
 
 def save_checkpoint_to(path, model, optimizer, scheduler, epoch, id, args):
     if args.keep:
+        model_to_save = model.module if hasattr(model, "module") else model
         save_args = copy(args)
         save_args.paths = None
         state = {
             'epoch': epoch,
-            'model_state_dict': model.state_dict(),
+            'model_state_dict': model_to_save.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'ID': id,
             'args': save_args,
