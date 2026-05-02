@@ -1,14 +1,15 @@
+# exp05와 동일 설정, ConvNeXt 유지 + top-down FPN 융합만 켬 (use_fpn: true).
 dataset: "ttpla"
-run_name: "exp03_backbone_convnext_nofpn_confgated"
+run_name: "exp10_fpn_1024"
 
 batch_size: 10
 epoch: 50
-img_height: 576
+img_height: 1024
 
 scale: 32
 head_level: P4
 backbone: convnext
-use_fpn: false
+use_fpn: true
 backbone_pretrained: True
 
 training_variables: geom,confidence
@@ -16,10 +17,9 @@ activations: linear,sigmoid
 loss: norm_mean,mse_mean
 loss_weight_strategy: fixed
 weights: "2,1"
-conf_match_weight: 5,1
-confidence: 0.3
+conf_match_weight: 1,10
+confidence: 0.5
 
-# Keep matching mode same as baseline; change backbone only.
 loss_hard_matching: true
 match_by_conf_first: true
 use_conf_in_loss_matching: false

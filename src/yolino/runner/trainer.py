@@ -152,6 +152,7 @@ class TrainHandler:
         self.losses = {}
         self.losses[TRAIN_TAG] = LossContainer(report_vars, len(self.loader), self.loss_weights)
         self.losses[VAL_TAG] = LossContainer(report_vars, len(self.val_loader), self.loss_weights)
+        self.fixed_val_viz_files = []
 
     @staticmethod
     def __init_loss_weights__(num_train_vars, cuda, loss_weighting: LossWeighting, is_exponential,
@@ -505,24 +506,14 @@ class TrainHandler:
         if self.args.gpu:
             preds = preds.to("cpu")
             images = images.to("cpu")
-        viz_files = [
-            "val/a33a44fb-6008-3dc2-b7c5-2d27b70741e8/sensors/cameras/ring_front_center/315967270349927216.jpg",
-            "val/42f92807-0c5e-3397-bd45-9d5303b4db2a/sensors/cameras/ring_front_center/315976319849927222.jpg",
-            "val/02a00399-3857-444e-8db3-a8f58489c394/sensors/cameras/ring_front_center/315966079549927215.jpg",
-            "val/24642607-2a51-384a-90a7-228067956d05/sensors/cameras/ring_front_center/315970919849927217.jpg",
-            "val/6803104a-bb06-402e-8471-e5af492db0a8/sensors/cameras/ring_front_center/315977901249927221.jpg",
-            "val/9a448a80-0e9a-3bf0-90f3-21750dfef55a/sensors/cameras/ring_front_center/315975805899927216.jpg",
-            "val/d3ca0450-2167-38fb-b34b-449741cb38f3/sensors/cameras/ring_front_center/315968247249927218.jpg",
-            "val/e1d68dde-22a9-3918-a526-0850b21ff2eb/sensors/cameras/ring_front_center/315969765649927217.jpg",
-            "val/0fb7276f-ecb5-3e5b-87a8-cc74c709c715/sensors/cameras/ring_front_center/315968086249927214.jpg",
-            # tusimple
-            "0531/1492626287507231547/20.jpg",
-        ]
+        if len(self.fixed_val_viz_files) < 10:
+            for fname in filenames:
+                if fname not in self.fixed_val_viz_files:
+                    self.fixed_val_viz_files.append(fname)
+                if len(self.fixed_val_viz_files) >= 10:
+                    break
 
-        if not "ring_front_center" in filenames[0] or self.args.max_n == 1:
-            viz_files.append(filenames[0])
-
-        for viz_file_name in viz_files:
+        for viz_file_name in self.fixed_val_viz_files:
             if viz_file_name in filenames:
                 idx = np.where(viz_file_name == np.asarray(filenames))[0][0]
             else:
@@ -569,7 +560,8 @@ class TrainHandler:
         Log.push(epoch)
 
     def save_new_best(self, epoch):
-        save_best_checkpoint(self.args, self.forward.model, self.optimizer, self.scheduler, epoch, self.args.id)
+        if self.args.keep:
+            save_best_checkpoint(self.args, self.forward.model, self.optimizer, self.scheduler, epoch, self.args.id)
         Log.scalars(tag=VAL_TAG, dict={"loss/best/mean": self.best_mean_loss,
                                        "loss/best/gradient": self.best_gradient_loss,
                                        "epoch/best": self.best_epoch}, epoch=epoch)
@@ -589,22 +581,26 @@ class TrainHandler:
         return converged
 
     def on_training_finished(self, epoch, do_nms):
+        best_model_exists = bool(getattr(self.args, "keep", False)) and os.path.exists(str(self.args.paths.best_model))
+        if best_model_exists:
+            Log.print('**** Best Model Eval %s ****' % (self.args.id))
+            best_evaluator = Evaluator(args=self.evaluator.args, anchors=self.evaluator.anchors,
+                                       coords=self.evaluator.coords, load_best_model=True)
+            # best_evaluator.plot = True
+            for i, data in tqdm(enumerate(self.loader), total=len(self.loader)):
+                images, grid_tensor, fileinfo, dupl, params = data
 
-        Log.print('**** Best Model Eval %s ****' % (self.args.id))
-        best_evaluator = Evaluator(args=self.evaluator.args, anchors=self.evaluator.anchors,
-                                   coords=self.evaluator.coords, load_best_model=True)
-        # best_evaluator.plot = True
-        for i, data in tqdm(enumerate(self.loader), total=len(self.loader)):
-            images, grid_tensor, fileinfo, dupl, params = data
-
-            num_duplicates = int(sum(dupl["total_duplicates_in_image"]).item())
-            preds, _ = best_evaluator(images=images, grid_tensor=grid_tensor, idx=i, filenames=fileinfo, tag="best/val",
-                                      epoch=None, num_duplicates=num_duplicates)
-            self.plot_val_summary(epoch, filenames=fileinfo, grid_tensor=grid_tensor, images=images, preds=preds)
-            preds, _ = best_evaluator(images=images, grid_tensor=grid_tensor, idx=i, filenames=fileinfo, tag="best/val",
-                                      do_in_uv=False, epoch=None, num_duplicates=num_duplicates)
-        best_evaluator.publish_scores(epoch=None, tag="best/" + VAL_TAG)
-        Log.push(None)
+                num_duplicates = int(sum(dupl["total_duplicates_in_image"]).item())
+                preds, _ = best_evaluator(images=images, grid_tensor=grid_tensor, idx=i, filenames=fileinfo,
+                                          tag="best/val", epoch=None, num_duplicates=num_duplicates)
+                self.plot_val_summary(epoch, filenames=fileinfo, grid_tensor=grid_tensor, images=images, preds=preds)
+                preds, _ = best_evaluator(images=images, grid_tensor=grid_tensor, idx=i, filenames=fileinfo,
+                                          tag="best/val", do_in_uv=False, epoch=None, num_duplicates=num_duplicates)
+            best_evaluator.publish_scores(epoch=None, tag="best/" + VAL_TAG)
+            Log.push(None)
+        else:
+            Log.warning("Skip best-model evaluation: checkpoint missing (keep=%s, best_model=%s)"
+                        % (str(getattr(self.args, "keep", False)), str(self.args.paths.best_model)))
 
         if do_nms:
             Log.print('**** NMS Training Data Eval %s ****' % (self.args.id))

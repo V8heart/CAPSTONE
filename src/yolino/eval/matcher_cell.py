@@ -32,7 +32,8 @@ class CellMatcher(Matcher):
     def __init__(self, coords: VariableStructure, args):
         super().__init__(coords, args, distance_threshold=-1, is_cell_based=True)
 
-    def sort_cells_by_geometric_match(self, preds, grid_tensor, filenames, epoch, tag="dummy_matcher"):
+    def sort_cells_by_geometric_match(self, preds, grid_tensor, filenames, epoch, tag="dummy_matcher",
+                                      allow_inconfident_rematch=True, confidence_threshold=None):
         """
         Calculate the distance between all predictions and GTs within a cell.
         We assume all GT have a match and thus provide the sorted GT to match the assigned predictions.
@@ -70,8 +71,11 @@ class CellMatcher(Matcher):
             Log.info("Loss matching mode: identity (loss_hard_matching=false).")
             resorted_grid_tensor = grid_tensor
         else:
+            if confidence_threshold is None and allow_inconfident_rematch:
+                confidence_threshold = self.args.confidence
             matched_predictions, _ = self.match(preds=preds, grid_tensor=grid_tensor, filenames=filenames,
-                                                confidence_threshold=self.args.confidence)
+                                                confidence_threshold=confidence_threshold,
+                                                allow_inconfident_rematch=allow_inconfident_rematch)
             resorted_grid_tensor = self.__resort_by_match_ids__(grid_tensor, matched_predictions)
 
         self._debug_full_match_plot_(epoch, preds, resorted_grid_tensor, filenames, CoordinateSystem.CELL_SPLIT,
@@ -82,7 +86,7 @@ class CellMatcher(Matcher):
 
         return preds, resorted_grid_tensor
 
-    def match(self, preds, grid_tensor, filenames, confidence_threshold):
+    def match(self, preds, grid_tensor, filenames, confidence_threshold, allow_inconfident_rematch=True):
         """
         Determines a 1:1 matching between GT and prediction.
         The distance metric is specified in the constructor.
@@ -120,7 +124,9 @@ class CellMatcher(Matcher):
             grid_tensor_cell = grid_tensor[b_idx, c_idx]
             pred_cell = preds[b_idx, c_idx]
             idx = b_idx * num_cells + c_idx
-            if self.args.match_by_conf_first:
+            if confidence_threshold is None:
+                ids = torch.arange(len(pred_cell), device=pred_cell.device)
+            elif self.args.match_by_conf_first:
                 ids = torch.where(pred_cell[:, -1] >= confidence_threshold)[0]
             else:
                 ids = range(len(pred_cell))
@@ -141,7 +147,7 @@ class CellMatcher(Matcher):
                                                 for i in g], device=preds.device)
                 matched_preds[idx, ids] = p.to(preds.device)
 
-            if self.args.match_by_conf_first and \
+            if allow_inconfident_rematch and confidence_threshold is not None and self.args.match_by_conf_first and \
                     torch.any(matched_gt[idx, gt_is_valid[b_idx][c_idx]] == self.no_match_index):
                 inconfident_prediction_ids = torch.where(pred_cell[:, -1] < confidence_threshold)[0]
                 inconfident_predictions = pred_cell[inconfident_prediction_ids]

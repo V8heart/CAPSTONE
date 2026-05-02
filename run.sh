@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-/home/work/caps_drone/yolino/venv/bin/python}"
 CONFIG_PATH=""
+# GPU/process count: pass explicitly via --nproc (or set NPROC_PER_NODE before invoking run.sh).
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 DVC_DIR="${DVC_DIR:-$ROOT_DIR/ttpla_train_exp}"
 LOG_DIR="${LOG_DIR:-ttpla_experiments}"
@@ -11,8 +12,9 @@ DATASET_ROOT="${DATASET_ROOT:-${DATASET_TTPLA:-}}"
 EXTRA_ARGS=()
 
 usage() {
-  echo "Usage: bash run.sh --config <config.yaml> [--dataset-root <path>] [--nproc <int>] [--log-dir <name>] [-- extra train args]"
-  echo "Example: bash run.sh --config configs/experiments/exp01_baseline_1k.yaml --dataset-root /home/work/caps_drone/yolino/ttpla_yolino_dataset_downsample"
+  echo "Usage: bash run.sh --config <config.yaml> [--dataset-root <path>] [--nproc <gpus>] [--log-dir <name>] [-- extra train args]"
+  echo "  --nproc     torchrun processes per node (typically GPU count). Default: 4 or \$NPROC_PER_NODE."
+  echo "Example: bash run.sh --config configs/experiments/exp05_convnext_baseline_1024.yaml --dataset-root ... --nproc 4 -- ..."
 }
 
 while [[ $# -gt 0 ]]; do

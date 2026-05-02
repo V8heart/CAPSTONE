@@ -23,6 +23,7 @@ import os
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from yolino.eval.distances import linesegment_euclidean_distance
 from yolino.eval.matcher_cell import CellMatcher
 from yolino.model.activations import get_activations
@@ -44,6 +45,7 @@ class AbstractLoss:
         if self.gpu:
             self.function.cuda()
         self.conf_match_weight = conf_match_weight
+        self.conf_negative_weight = 1.0
         self.reduction = reduction
         self.activation_is_exp = activation_is_exp
 
@@ -183,7 +185,7 @@ class AbstractLoss:
                                                             weight_strategy=self.loss_weight_strategy,
                                                             weight=self.conf_match_weight[1],
                                                             activation_is_exponential=self.activation_is_exp)
-            weighted_loss += weight_factors * unmatched_loss + add_weights
+            weighted_loss += weight_factors * (self.conf_negative_weight * unmatched_loss) + add_weights
             mean_loss = (mean_matched_loss + mean_unmatched_loss) * 0.5
         else:
             weighted_loss = mean_matched_loss
@@ -247,14 +249,17 @@ class FocalConfidenceLoss(AbstractLoss):
 
             def __call__(self, preds, gts):
                 # preds are confidence probabilities (sigmoid already applied in model activations)
-                preds = torch.clamp(preds, min=1e-6, max=1 - 1e-6)
+                probs = torch.clamp(preds, min=1e-6, max=1 - 1e-6)
                 gts = torch.clamp(gts, min=0.0, max=1.0)
-                ce = -(gts * torch.log(preds) + (1 - gts) * torch.log(1 - preds))
-                pt = torch.where(gts > 0.5, preds, 1 - preds)
+                logits = torch.logit(probs)
+                ce = F.binary_cross_entropy_with_logits(logits, gts, reduction="none")
+                pt = torch.exp(-ce)
                 alpha_t = torch.where(gts > 0.5,
                                       torch.full_like(gts, self.alpha),
                                       torch.full_like(gts, 1.0 - self.alpha))
-                return (alpha_t * ((1 - pt) ** self.gamma) * ce).mean()
+                focal = alpha_t * ((1 - pt) ** self.gamma) * ce
+                focal = torch.where(torch.isfinite(focal), focal, torch.zeros_like(focal))
+                return focal.mean()
 
             def cuda(self):
                 return self
@@ -585,7 +590,9 @@ def get_loss(losses, args, coords: VariableStructure, weights: list, anchors, co
             functions.append(FocalConfidenceLoss(coords=coords, gpu=args.gpu, cuda=args.cuda, variable=variable,
                                                 conf_match_weight=conf_weights,
                                                 activation_is_exp=activation_is_exp,
-                                                loss_weight_strategy=loss_weight_strategy))
+                                                loss_weight_strategy=loss_weight_strategy,
+                                                gamma=getattr(args, "focal_gamma", 2.0),
+                                                alpha=getattr(args, "focal_alpha", 0.25)))
         elif loss == LOSS.MSE_SUM:
             functions.append(MeanSquaredErrorLoss(reduction="sum", coords=coords, gpu=args.gpu, cuda=args.cuda,
                                                   variable=variable, batch_size=args.batch_size,
@@ -640,6 +647,9 @@ def get_loss(losses, args, coords: VariableStructure, weights: list, anchors, co
             )
         )
     composed_loss = LossComposition(losses=functions, args=args, coords=coords, weights=weights, anchors=anchors)
+    for fct in functions:
+        if getattr(fct, "variable", None) == Variables.CONF:
+            fct.conf_negative_weight = float(getattr(args, "conf_negative_weight", 1.0))
     return composed_loss
 
 
@@ -708,10 +718,61 @@ class LossComposition:
         self.coords = coords
         self.weights = weights
         self.matcher = CellMatcher(coords, args)
+        self._conf_dist_logged_epochs = set()
         Log.debug("Weights=%s" % self.weights)
         if len(self.losses) != len(self.weights):
             raise ValueError("Please specify the same number of loss terms as weights, we got %s loss terms, "
                              "but %s weights." % (self.losses, self.weights))
+
+    def _add_conf_stats(self, stats_dict, prefix, values):
+        if values is None or values.numel() == 0:
+            return
+        vals = values.detach().float()
+        stats_dict[f"{prefix}/mean"] = float(vals.mean().item())
+        stats_dict[f"{prefix}/std"] = float(vals.std(unbiased=False).item())
+        stats_dict[f"{prefix}/p50"] = float(torch.quantile(vals, 0.5).item())
+        stats_dict[f"{prefix}/p90"] = float(torch.quantile(vals, 0.9).item())
+        stats_dict[f"{prefix}/high_ratio"] = float((vals >= float(self.args.confidence)).float().mean().item())
+
+    def _log_confidence_distribution(self, geom_preds_flat, reduced_grid_tensor, epoch, tag):
+        if Variables.CONF not in self.coords.train_vars():
+            return
+        epoch_key = int(epoch) if epoch is not None else -1
+        log_key = (str(tag), epoch_key)
+        if log_key in self._conf_dist_logged_epochs:
+            return
+        self._conf_dist_logged_epochs.add(log_key)
+
+        conf_pos_pred = self.coords.get_position_within_prediction(Variables.CONF)
+        conf_pos_gt = self.coords.get_position_of(Variables.CONF)
+        geom_pos_gt = self.coords.get_position_of(Variables.GEOMETRY)
+
+        pred_conf = geom_preds_flat[:, conf_pos_pred].detach()
+        gt_conf = reduced_grid_tensor[:, conf_pos_gt].detach()
+        gt_conf = torch.where(torch.isnan(gt_conf), torch.zeros_like(gt_conf), gt_conf)
+        matched_mask = ~torch.any(torch.isnan(reduced_grid_tensor[:, geom_pos_gt]), dim=1)
+        unmatched_mask = ~matched_mask
+
+        stats = {}
+        self._add_conf_stats(stats, "conf_dist/pred/all", pred_conf)
+        self._add_conf_stats(stats, "conf_dist/pred/matched", pred_conf[matched_mask])
+        self._add_conf_stats(stats, "conf_dist/pred/unmatched", pred_conf[unmatched_mask])
+        self._add_conf_stats(stats, "conf_dist/gt/all", gt_conf)
+        self._add_conf_stats(stats, "conf_dist/gt/matched", gt_conf[matched_mask])
+        self._add_conf_stats(stats, "conf_dist/gt/unmatched", gt_conf[unmatched_mask])
+
+        num_predictors = int(getattr(self.args, "num_predictors", 1))
+        if num_predictors > 0:
+            predictor_idx = torch.arange(len(pred_conf), device=pred_conf.device) % num_predictors
+            for p in range(num_predictors):
+                p_mask = predictor_idx == p
+                self._add_conf_stats(stats, f"conf_dist/pred/p{p}/all", pred_conf[p_mask])
+                self._add_conf_stats(stats, f"conf_dist/pred/p{p}/matched", pred_conf[p_mask & matched_mask])
+                self._add_conf_stats(stats, f"conf_dist/pred/p{p}/unmatched", pred_conf[p_mask & unmatched_mask])
+                stats[f"conf_dist/pred/p{p}/match_ratio"] = float((p_mask & matched_mask).float().mean().item())
+
+        if len(stats) > 0:
+            Log.scalars(tag=tag, dict=stats, epoch=epoch)
 
     def __call__(self, geom_preds, embed_preds, grid_tensor, filenames, epoch, tag="dummy_loss"):
         if torch.any(torch.isnan(geom_preds)):
@@ -740,6 +801,10 @@ class LossComposition:
             reduced_grid_tensor = grid_tensor.reshape(-1, self.coords.get_length())
             geom_preds_flat = geom_preds.reshape(-1, self.coords.num_vars_to_train())
             embed_preds_flat = embed_preds.reshape(-1, embed_preds.shape[-1])
+
+        self._log_confidence_distribution(geom_preds_flat=geom_preds_flat,
+                                          reduced_grid_tensor=reduced_grid_tensor,
+                                          epoch=epoch, tag=tag)
 
         end = datetime.now()
         seconds = ((end - start) / timedelta(milliseconds=1))

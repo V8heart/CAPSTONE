@@ -95,7 +95,7 @@ class SampleGeometryMetrics(DetectionMetrics):
         matched_preds_indices, _ = self.matcher.match(preds=torch.unsqueeze(torch.tensor(p_samples), dim=0),
                                                       grid_tensor=list([torch.tensor(gt_samples)]), filenames=filenames)
         # [batch*lines, x]
-        preds_uv, gt_uv = self.matcher.sort_lines_by_geometric_match(
+        preds_uv, gt_uv, _ = self.matcher.sort_lines_by_geometric_match(
             preds=torch.unsqueeze(torch.tensor(p_samples), dim=0),
             grid_tensor=list([torch.tensor(gt_samples)]),
             epoch=None, never_plot=True, filenames=filenames)

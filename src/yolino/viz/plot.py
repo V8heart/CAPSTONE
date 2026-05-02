@@ -601,10 +601,7 @@ def plot_style_grid(lines, name, image, coords: VariableStructure = None, show_g
         if style == ColorStyle.CONFIDENCE and not Variables.CONF in coords.train_vars():
             continue
 
-        if style == ColorStyle.CONFIDENCE:
-            thresholds = [0]
-        else:
-            thresholds = np.unique([threshold])
+        thresholds = np.unique([threshold])
 
         for t in thresholds:
             line_img, ok = plot(lines, name="", image=image, coords=coords,

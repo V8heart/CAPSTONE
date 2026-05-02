@@ -207,6 +207,10 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
                              help="If true, use top-down FPN fusion. "
                                   "If false, skip top-down fusion and use per-level projected backbone features "
                                   "(same P2/P3/P4 strides, no cross-level fusion).")
+    model_group.add_argument("--use_bottom_up", action=ParseBool, default=False,
+                             help="If true, rebuild P4 by bottom-up fusion (downsample exported P2, add pre-smooth "
+                                  "m3/m4). Recommended with use_fpn=True for FPN+PANet-like semantics; "
+                                  "use_fpn=False gives lateral-only m3/m4 (different ablation).")
     model_group.add_argument("--backbone_freeze_epochs", type=int, default=0,
                              help="Freeze the ConvNeXt body for the first N epochs (only FPN+heads train). "
                                   "0 disables freezing. Useful to stabilize new heads on a pretrained backbone.")
@@ -302,6 +306,12 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
                             help="Specify the weight for all matches on the conf loss and the unmatched. "
                                  "Helps with the imbalance between number of matched predictors and unmatched predictors."
                                  "Pass `calculate` to let us calculate the weights.")
+    loss_group.add_argument("--conf_negative_weight", type=float, default=1.0,
+                            help="Additional multiplier for unmatched confidence loss.")
+    loss_group.add_argument("--focal_gamma", type=float, default=2.0,
+                            help="Gamma parameter for focal confidence loss.")
+    loss_group.add_argument("--focal_alpha", type=float, default=0.25,
+                            help="Alpha parameter for focal confidence loss.")
     loss_group.add_argument("--match_by_conf_first", action=ParseBool,
                             help="Apply two-stage matching. 1. Only match predictions with confidence > --confidence. "
                                  "2. Match all remaining. This only affects the loss matching, not the evaluation.")
@@ -363,6 +373,10 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
                             help="Provide a path to an alternative model.pth file. By default we use "
                                  "log/checkpoints/model.path (training continued) or log/checkpoints/best_model.pth (prediction)"
                                  "in the --dvc folder.")
+    eval_group.add_argument("--log_duplicate_metrics", action=ParseBool, default=False,
+                            help="Log duplicate-adjusted matching metrics (suffix _dupl).")
+    eval_group.add_argument("--log_strict_metrics", action=ParseBool, default=False,
+                            help="Log strict matching metrics without confidence rematch/filter.")
     # Tusimple Benchmark / Connection
     postproc_group = parser.add_argument_group("Postprocessing")
     postproc_group.add_argument("--min_segments_for_polyline", type=int, required=True,

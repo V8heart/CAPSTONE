@@ -1,0 +1,42 @@
+# exp06 + focal 하이퍼 조정 + nomatch Hungarian 가중 완화.
+# 동기: focal이 쉬운 부정을 줄이는 역할과 conf_match_weight의 nomatch 항이 겹칠 수 있어,
+# γ·α로 재분포를 바꾸고 nomatch(두 번째 값)만 exp06 대비 낮춤. geom/conf 손실 비중(weights)은 exp06과 동일.
+dataset: "ttpla"
+run_name: "exp06b_convnext_focal_tuned_nomatchrelax_1024"
+
+batch_size: 10
+epoch: 50
+img_height: 1024
+
+scale: 32
+head_level: P4
+backbone: convnext
+use_fpn: false
+backbone_pretrained: True
+
+training_variables: geom,confidence
+activations: linear,sigmoid
+loss: norm_mean,focal_mean
+loss_weight_strategy: fixed
+weights: "2,1"
+conf_match_weight: 1,6
+confidence: 0.5
+
+loggers: ["file", "tb"]
+metrics: [f1, precision, recall, accuracy, tp, fn, tn, fp]
+log_duplicate_metrics: false
+log_strict_metrics: false
+
+focal_gamma: 3.0
+focal_alpha: 0.25
+
+loss_hard_matching: true
+match_by_conf_first: true
+use_conf_in_loss_matching: false
+
+amp: false
+loading_workers: 4
+augment: crop,rotation,jitter,erasing,noise,normalize
+keep: "True"
+checkpoint_iteration: "1"
+eval_iteration: "1"
