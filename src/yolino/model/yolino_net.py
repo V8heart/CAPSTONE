@@ -115,6 +115,43 @@ class GlobalSelfAttention(nn.Module):
         return x + self.gamma * out
 
 
+class BottomUpFuseToP4(nn.Module):
+    """
+    Bottom-up fusion into stride-32 (P4) grid while keeping head_level=P4.
+
+    Uses smooth+GN **p2** (same as exported P2) but **m3/m4** are pre-smooth tensors
+    after lateral (+ optional top-down add): PANet-style “all smoothed levels” fusion
+    is not matched exactly; see smoother-aligned variant as a future option.
+
+        n3 = smooth_bu( down_stride2(p2) + m3 )
+        P4_bu = smooth_bu( down_stride2(n3) + m4 )
+
+    Stride-2 uses 3x3 conv. When disabled, forward falls back to P4_td = smooth(m4).
+    """
+
+    def __init__(self, out_channels: int):
+        super().__init__()
+        oc = int(out_channels)
+        gn_groups = 32 if oc % 32 == 0 else 16
+        self.down_p2_to_p3 = nn.Conv2d(oc, oc, kernel_size=3, stride=2, padding=1)
+        self.smooth_bu3 = nn.Conv2d(oc, oc, kernel_size=3, padding=1)
+        self.norm_bu3 = nn.GroupNorm(gn_groups, oc)
+        self.down_p3_to_p4 = nn.Conv2d(oc, oc, kernel_size=3, stride=2, padding=1)
+        self.smooth_bu4 = nn.Conv2d(oc, oc, kernel_size=3, padding=1)
+        self.norm_bu4 = nn.GroupNorm(gn_groups, oc)
+        for m in (self.down_p2_to_p3, self.smooth_bu3, self.down_p3_to_p4, self.smooth_bu4):
+            nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    def forward(self, p2: torch.Tensor, m3: torch.Tensor, m4: torch.Tensor) -> torch.Tensor:
+        x = self.down_p2_to_p3(p2) + m3
+        x = self.norm_bu3(self.smooth_bu3(x))
+        x = self.down_p3_to_p4(x) + m4
+        x = self.norm_bu4(self.smooth_bu4(x))
+        return x
+
+
 # --------------------------------------------------------------------------- #
 # ConvNeXt-Tiny + FPN backbone
 # --------------------------------------------------------------------------- #
@@ -136,7 +173,10 @@ class ConvNeXt_FPN_Backbone(nn.Module):
         M4 = 1x1(C4)
         M3 = 1x1(C3) + Upsample(M4)
         M2 = 1x1(C2) + Upsample(M3)
-        P{2,3,4} = 3x3(M{2,3,4})       # anti-aliasing smooth conv
+        P2, P3 = 3x3+GN(M2), 3x3+GN(M3)   # anti-aliasing smooth conv
+
+    Optional bottom-up (use_bottom_up): replace P4 with fusion of P2_td + m3 + m4 at
+    stride 32 so fine C2-derived features inform the P4 grid without multi-level heads.
 
     Output dict keys: "P2" (1/8), "P3" (1/16), "P4" (1/32), all `out_channels` channels.
     """
@@ -162,10 +202,12 @@ class ConvNeXt_FPN_Backbone(nn.Module):
                  out_channels: int = 256,
                  pretrained: bool = True,
                  upsample_mode: str = "nearest",
-                 use_fpn: bool = True):
+                 use_fpn: bool = True,
+                 use_bottom_up: bool = False):
         super().__init__()
         self.out_channels = int(out_channels)
         self.use_fpn = bool(use_fpn)
+        self.use_bottom_up = bool(use_bottom_up)
         if upsample_mode not in ("nearest", "bilinear"):
             raise ValueError("upsample_mode must be 'nearest' or 'bilinear', got %r" % upsample_mode)
         self.upsample_mode = upsample_mode
@@ -205,6 +247,13 @@ class ConvNeXt_FPN_Backbone(nn.Module):
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
 
+        self.bottom_up = BottomUpFuseToP4(self.out_channels) if self.use_bottom_up else None
+        if self.use_bottom_up and not self.use_fpn:
+            Log.warning(
+                "use_bottom_up=True with use_fpn=False: m3/m4 are lateral-only (no top-down add). "
+                "Bottom-up becomes coarse←fine fusion without FPN semantics — prefer use_fpn=True "
+                "for PANet-style comparisons unless intentionally ablating.")
+
     def _upsample_to(self, x: torch.Tensor, size) -> torch.Tensor:
         if self.upsample_mode == "nearest":
             return F.interpolate(x, size=size, mode="nearest")
@@ -222,11 +271,17 @@ class ConvNeXt_FPN_Backbone(nn.Module):
             m3 = m3 + self._upsample_to(m4, c3.shape[-2:])
             m2 = m2 + self._upsample_to(m3, c2.shape[-2:])
 
-        p4 = self.smooth_norm_p4(self.smooth_p4(m4))
         p3 = self.smooth_norm_p3(self.smooth_p3(m3))
         p2 = self.smooth_norm_p2(self.smooth_p2(m2))
 
+        if self.bottom_up is not None:
+            p4 = self.bottom_up(p2, m3, m4)
+        else:
+            p4 = self.smooth_norm_p4(self.smooth_p4(m4))
+
         mode = "FPN" if self.use_fpn else "no-FPN"
+        if self.bottom_up is not None:
+            mode += "+BU"
         Log.debug("ConvNeXt+%s feats: C2=%s C3=%s C4=%s | P2=%s P3=%s P4=%s"
                   % (mode, tuple(c2.shape), tuple(c3.shape), tuple(c4.shape),
                      tuple(p2.shape), tuple(p3.shape), tuple(p4.shape)))
@@ -265,7 +320,8 @@ class Darknet_FPN_Backbone(nn.Module):
                  out_channels: int = 256,
                  pretrained: bool = True,
                  upsample_mode: str = "nearest",
-                 use_fpn: bool = True):
+                 use_fpn: bool = True,
+                 use_bottom_up: bool = False):
         super().__init__()
         import os as _os
         from yolino.model.darknet import Darknet
@@ -277,6 +333,7 @@ class Darknet_FPN_Backbone(nn.Module):
 
         self.out_channels = int(out_channels)
         self.use_fpn = bool(use_fpn)
+        self.use_bottom_up = bool(use_bottom_up)
         if upsample_mode not in ("nearest", "bilinear"):
             raise ValueError("upsample_mode must be 'nearest' or 'bilinear', got %r" % upsample_mode)
         self.upsample_mode = upsample_mode
@@ -318,6 +375,13 @@ class Darknet_FPN_Backbone(nn.Module):
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
 
+        self.bottom_up = BottomUpFuseToP4(self.out_channels) if self.use_bottom_up else None
+        if self.use_bottom_up and not self.use_fpn:
+            Log.warning(
+                "use_bottom_up=True with use_fpn=False: m3/m4 are lateral-only (no top-down add). "
+                "Bottom-up becomes coarse←fine fusion without FPN semantics — prefer use_fpn=True "
+                "for PANet-style comparisons unless intentionally ablating.")
+
     def _upsample_to(self, x: torch.Tensor, size) -> torch.Tensor:
         if self.upsample_mode == "nearest":
             return F.interpolate(x, size=size, mode="nearest")
@@ -334,11 +398,17 @@ class Darknet_FPN_Backbone(nn.Module):
             m3 = m3 + self._upsample_to(m4, c3.shape[-2:])
             m2 = m2 + self._upsample_to(m3, c2.shape[-2:])
 
-        p4 = self.smooth_norm_p4(self.smooth_p4(m4))
         p3 = self.smooth_norm_p3(self.smooth_p3(m3))
         p2 = self.smooth_norm_p2(self.smooth_p2(m2))
 
+        if self.bottom_up is not None:
+            p4 = self.bottom_up(p2, m3, m4)
+        else:
+            p4 = self.smooth_norm_p4(self.smooth_p4(m4))
+
         mode = "FPN" if self.use_fpn else "no-FPN"
+        if self.bottom_up is not None:
+            mode += "+BU"
         Log.debug("Darknet+%s feats: C2=%s C3=%s C4=%s | P2=%s P3=%s P4=%s"
                   % (mode, tuple(c2.shape), tuple(c3.shape), tuple(c4.shape),
                      tuple(p2.shape), tuple(p3.shape), tuple(p4.shape)))
@@ -380,13 +450,15 @@ class YolinoNet(nn.Module):
         pretrained = bool(getattr(args, "backbone_pretrained", True))
         upsample_mode = str(getattr(args, "fpn_upsample_mode", "nearest"))
         use_fpn = bool(getattr(args, "use_fpn", True))
+        use_bottom_up = bool(getattr(args, "use_bottom_up", False))
         backbone_name = str(getattr(args, "backbone", "convnext")).lower()
         self.backbone_name = backbone_name
         if backbone_name == "convnext":
             self.backbone = ConvNeXt_FPN_Backbone(out_channels=fpn_out,
                                                   pretrained=pretrained,
                                                   upsample_mode=upsample_mode,
-                                                  use_fpn=use_fpn)
+                                                  use_fpn=use_fpn,
+                                                  use_bottom_up=use_bottom_up)
         elif backbone_name == "darknet":
             cfg_path = getattr(args, "darknet_cfg", None)
             weights_path = getattr(args, "darknet_weights", None)
@@ -397,12 +469,14 @@ class YolinoNet(nn.Module):
                 pretrained=pretrained,
                 upsample_mode=upsample_mode,
                 use_fpn=use_fpn,
+                use_bottom_up=use_bottom_up,
             )
         else:
             raise ValueError("Unknown --backbone=%r (expected 'convnext' or 'darknet')"
                              % backbone_name)
-        Log.info("YolinoNet backbone=%s, use_fpn=%s, fpn_out=%d, head_level=%s"
-                 % (backbone_name, str(use_fpn), fpn_out, str(getattr(args, "head_level", "P3"))))
+        Log.info("YolinoNet backbone=%s, use_fpn=%s, use_bottom_up=%s, fpn_out=%d, head_level=%s"
+                 % (backbone_name, str(use_fpn), str(use_bottom_up), fpn_out,
+                    str(getattr(args, "head_level", "P3"))))
 
         # FPN level fed to the heads.
         self.head_level = str(getattr(args, "head_level", "P3"))

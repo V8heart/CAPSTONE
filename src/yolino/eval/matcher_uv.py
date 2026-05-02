@@ -40,7 +40,8 @@ class UVMatcher(Matcher):
         super().__init__(coords, args, distance_threshold, is_cell_based=False)
         self.distance_metric = self.args.association_metric
 
-    def match(self, preds: torch.tensor, grid_tensor: list, filenames, confidence_threshold=0):
+    def match(self, preds: torch.tensor, grid_tensor: list, filenames, confidence_threshold=0,
+              allow_inconfident_rematch=True):
         """
         Match GT with prediction as 1:1. If given in the constructor, a distance threshold is applied.
         The distance metric is also specified in the constructor.
@@ -79,7 +80,10 @@ class UVMatcher(Matcher):
                       % (b_idx, str(preds[b_idx].shape), str(grid_tensor[b_idx].shape)))
             Log.debug("%s" % grid_tensor[b_idx][0:5])
 
-            ids = torch.where(preds[b_idx, :, -1] >= confidence_threshold)[0]
+            if confidence_threshold is None:
+                ids = torch.arange(preds.shape[1], device=preds.device)
+            else:
+                ids = torch.where(preds[b_idx, :, -1] >= confidence_threshold)[0]
 
             if len(ids) > 0:
                 confident_predictions = preds[b_idx, ids]
@@ -95,7 +99,8 @@ class UVMatcher(Matcher):
                      for i in g])
                 matched_preds[b_idx, ids] = p
 
-            if torch.any(matched_gt[b_idx, 0:len(grid_tensor[b_idx])] == self.no_match_index):
+            if allow_inconfident_rematch and confidence_threshold is not None \
+                    and torch.any(matched_gt[b_idx, 0:len(grid_tensor[b_idx])] == self.no_match_index):
                 inconfident_prediction_ids = torch.where(preds[b_idx, :, -1] < confidence_threshold)[0]
                 inconfident_predictions = preds[b_idx, inconfident_prediction_ids]
 
@@ -126,8 +131,8 @@ class UVMatcher(Matcher):
         return matched_preds.to(preds.device), None
 
     def sort_lines_by_geometric_match(self, preds: torch.tensor, grid_tensor: list, filenames, epoch,
-                                      tag="dummy_matcher",
-                                      never_plot=False):
+                                      tag="dummy_matcher", never_plot=False, allow_inconfident_rematch=True,
+                                      confidence_threshold=None):
         """
         Calculate the distance between all predictions and GTs within an image.
 
@@ -149,11 +154,16 @@ class UVMatcher(Matcher):
                 Log.warning("We need labels to calculate an association. We continue without matching.")
             grid_tensor = torch.cat(grid_tensor)
             preds = preds.view(-1, self.coords.num_vars_to_train())
-            return preds, grid_tensor
+            matched_predictions = torch.ones((num_batch, num_lines), dtype=torch.int64,
+                                             device=preds.device) * self.no_match_index
+            return preds, grid_tensor, matched_predictions
 
         Log.debug("UV Matching works with shapes preds=%s and e.g. gt=%s" % (preds.shape, grid_tensor[0].shape))
+        if confidence_threshold is None and allow_inconfident_rematch:
+            confidence_threshold = self.args.confidence
         matched_predictions, _ = self.match(preds=preds, grid_tensor=grid_tensor, filenames=filenames,
-                                            confidence_threshold=self.args.confidence)
+                                            confidence_threshold=confidence_threshold,
+                                            allow_inconfident_rematch=allow_inconfident_rematch)
 
         # resort matched GT entries and have nan tensors in the remaining places
         # TODO rather not create a new one

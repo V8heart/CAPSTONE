@@ -52,6 +52,8 @@ _FPN_PREFIXES = (                                 # FPN lateral + smooth convs +
     "module.backbone.smooth_norm_p2.",
     "module.backbone.smooth_norm_p3.",
     "module.backbone.smooth_norm_p4.",
+    "backbone.bottom_up.",
+    "module.backbone.bottom_up.",
 )
 _GEOM_HEAD_PREFIXES = ("yolo.", "module.yolo.")
 _EMBED_HEAD_PREFIXES = ("embed_head.", "module.embed_head.")

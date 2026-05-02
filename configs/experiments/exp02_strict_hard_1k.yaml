@@ -1,7 +1,7 @@
 dataset: "ttpla"
 run_name: "exp02_strict_hard_darknet_nofpn"
 
-batch_size: 8
+batch_size: 10
 epoch: 50
 img_height: 576
 

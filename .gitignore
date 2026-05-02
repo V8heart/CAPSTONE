@@ -144,7 +144,7 @@ cython_debug/
 # End of https://www.toptal.com/developers/gitignore/api/python
 # --------- 
 
-tb_logs
+# tb_logs / runs: not ignored — may be large; exclude via .git/info/exclude locally if needed.
 src/yolino/models/cfg/darknet-cfg
 MNIST
 res/yolov3.weights
@@ -180,26 +180,23 @@ test/dvc/debug_*
 test/dvc/dummy_*
 test/dvc/log
 
-# ---- Project safety: do not upload datasets/checkpoints/artifacts ----
+# ---- Do not commit datasets or weight tensors; experiment logs/metrics may be tracked ----
 data/
 datasets/
+
+# Pretrained / exported weight files only (not CSV/JSON/text logs)
 weights/
-runs/
-log/
-cmd_logs/
-debug/
-qeval/
-ttpla_train_exp/runs/
-ttpla_train_exp/log/
-ttpla_train_exp/cmd_logs/
-ttpla_train_exp/debug/
-ttpla_train_exp/qeval/
+*.weights
 *.pth
 *.pt
 *.ckpt
 *.onnx
 
-# local heavy artifacts
-ttpla_train_exp/*.weights
-ttpla_train_exp/*.conv.*
-ttpla_train_exp/debug_id_assignment_report.json
+# TensorBoard / run artifacts (very large; do not commit)
+ttpla_train_exp/runs/
+
+# Per-epoch / run checkpoints (paths under experiment log root)
+ttpla_train_exp/**/checkpoints/
+
+# Optional local clutter (uncomment if needed)
+# ttpla_train_exp/debug_id_assignment_report.json

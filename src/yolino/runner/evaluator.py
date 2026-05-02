@@ -60,8 +60,6 @@ class Evaluator:
             args.retrain = False
             Log.warning("We set retrain==False")
             self.forward = ForwardRunner(args, coords=self.coords, load_best=load_best_model)
-            if self.forward.start_epoch == 0:
-                raise FileNotFoundError("Please provide a valid, trained model.")
         else:
             self.forward = None
 
@@ -262,6 +260,18 @@ class Evaluator:
         self.add_scores(scores)
         Log.eval_summary(self.scores)
 
+        if do_matching and getattr(self.args, "log_strict_metrics", False):
+            strict_pred, strict_grid = self.cell_matcher.sort_cells_by_geometric_match(
+                preds=preds, grid_tensor=grid_tensor, epoch=epoch, tag=tag + "_strict", filenames=filenames,
+                allow_inconfident_rematch=False, confidence_threshold=None)
+            strict_flags = ~strict_grid[:, 0].isnan()
+            strict_scores, _ = self.get_scores(
+                filenames=filenames, gt_uv=strict_grid, matched_prediction_flags=strict_flags, preds_uv=strict_pred,
+                prefix="cell_metrics_strict", num_duplicates=num_duplicates, geom_px_scale=self.args.cell_size[0]
+            )
+            self.add_scores(strict_scores)
+            Log.eval_summary(self.scores)
+
     def get_scores_uv(self, gt_uv: list, preds_uv: torch.tensor, epoch, filenames, num_duplicates, tag="dummy_eval",
                       prefix="uv_metrics", do_matching=True, calculate_iccv=False):
         """
@@ -285,6 +295,8 @@ class Evaluator:
         """
 
         start = timeit.default_timer()
+        raw_gt_uv = gt_uv
+        raw_preds_uv = preds_uv
         if not Variables.GEOMETRY in self.points_coords.train_vars():
             Log.warning("We do not eval scores without geometry")
             return
@@ -343,6 +355,20 @@ class Evaluator:
         self.add_scores(scores)
         Log.eval_summary(self.scores)
 
+        if do_matching and getattr(self.args, "log_strict_metrics", False):
+            strict_preds_uv, strict_gt_uv, strict_matched = self.matcher.sort_lines_by_geometric_match(
+                preds=raw_preds_uv, grid_tensor=raw_gt_uv, epoch=epoch,
+                tag=tag + "_strict", filenames=filenames, allow_inconfident_rematch=False,
+                confidence_threshold=None
+            )
+            strict_flags = torch.where(strict_matched == -100, 0, 1).flatten()
+            strict_scores, _ = self.get_scores(
+                filenames, strict_gt_uv, strict_flags, strict_preds_uv, prefix + "_strict",
+                num_duplicates=num_duplicates
+            )
+            self.add_scores(strict_scores)
+            Log.eval_summary(self.scores)
+
     def add_scores(self, scores):
         for k, v in scores.items():
             if k not in self.scores:
@@ -381,8 +407,9 @@ class Evaluator:
             pred_is_confident_flags = (preds_uv[:, conf_position] >= self.args.confidence).to(torch.int).flatten()
             scores.update(self.matching_metrics.get(preds=pred_is_confident_flags, labels=matched_prediction_flags,
                                                     num_duplicates=0, prefix=prefix))
-            scores.update(self.matching_metrics.get(preds=pred_is_confident_flags, labels=matched_prediction_flags,
-                                                    num_duplicates=num_duplicates, prefix=prefix + "_dupl"))
+            if getattr(self.args, "log_duplicate_metrics", False):
+                scores.update(self.matching_metrics.get(preds=pred_is_confident_flags, labels=matched_prediction_flags,
+                                                        num_duplicates=num_duplicates, prefix=prefix + "_dupl"))
 
             # select only true positives => conf > args.conf and match
             tp_flags = torch.logical_and(matched_prediction_flags, pred_is_confident_flags)
