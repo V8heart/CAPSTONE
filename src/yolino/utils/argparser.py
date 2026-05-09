@@ -167,12 +167,18 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
     model_group.add_argument("--model", type=Network, choices=list(Network), default=Network.YOLO_CLASS,
                              help="Provide network model name")
     model_group.add_argument("--backbone", type=str, default="convnext",
-                             choices=["convnext", "darknet"],
+                             choices=["convnext", "darknet", "timm"],
                              help="Backbone family for YolinoNet. "
                                   "'convnext' = ConvNeXt-Tiny + FPN (default). "
                                   "'darknet'  = Darknet-19 (cfg via --darknet_cfg, optional dilation) + FPN. "
+                                  "'timm' = timm backbone (e.g. resnet50_dilated/hrnet_w32) + FPN. "
                                   "Both expose `backbone.body.*` so layer-wise LR groups "
                                   "(`--lr_backbone/--lr_fpn/...`) and freeze logic behave identically.")
+    model_group.add_argument("--timm_model_name", type=str, default="resnet50_dilated",
+                             choices=["resnet50_dilated", "hrnet_w32"],
+                             help="Only used when --backbone=timm. "
+                                  "resnet50_dilated=ResNet-50 output_stride=16, "
+                                  "hrnet_w32=standard HRNet-W32.")
     model_group.add_argument("--darknet_cfg", type=str, default="model/cfg/darknet19_448_d2.cfg",
                              help="Path to the darknet config. Will be appended to the root path.")
     model_group.add_argument("--darknet_weights", type=str, default="model/cfg/darknet19_448.weights",
@@ -194,10 +200,10 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
                              help="FPN lateral/smooth conv output channels. Heads consume this directly. "
                                   "Default 256.")
     model_group.add_argument("--head_level", type=str, default="P3",
-                             choices=["P2", "P3", "P4"],
+                             choices=["P2", "P3", "P4", "P5"],
                              help="FPN level fed to geometry/embedding heads. "
-                                  "P2=stride 8, P3=stride 16, P4=stride 32. "
-                                  "MUST match --scale (P2:8, P3:16, P4:32).")
+                                  "P2=stride 8, P3=stride 16, P4=stride 32, P5=stride 32 (when provided). "
+                                  "MUST match --scale (P2:8, P3:16, P4/P5:32).")
     model_group.add_argument("--backbone_pretrained", action=ParseBool, default=True,
                              help="Load ImageNet-pretrained ConvNeXt-Tiny weights (True/False).")
     model_group.add_argument("--fpn_upsample_mode", type=str, default="nearest",
@@ -211,6 +217,10 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
                              help="If true, rebuild P4 by bottom-up fusion (downsample exported P2, add pre-smooth "
                                   "m3/m4). Recommended with use_fpn=True for FPN+PANet-like semantics; "
                                   "use_fpn=False gives lateral-only m3/m4 (different ablation).")
+    model_group.add_argument("--timm_force_stride32_head", action=ParseBool, default=False,
+                             help="Only for --backbone=timm. If true, apply an extra stride-2 down-projection "
+                                  "(3x3 conv + BN + GELU) on P4 and export it as P5 so head_level=P5 can "
+                                  "use stride-32 semantics while keeping high-res backbone features.")
     model_group.add_argument("--backbone_freeze_epochs", type=int, default=0,
                              help="Freeze the ConvNeXt body for the first N epochs (only FPN+heads train). "
                                   "0 disables freezing. Useful to stabilize new heads on a pretrained backbone.")
@@ -231,6 +241,10 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
     augment_group.add_argument("--augment", type=str, action=ParseAugmentation, required=True,
                                help="Provide list of all augmentations to apply. The methods will be applied in order."
                                     "Choose from %s" % [a.value for a in Augmentation])
+    augment_group.add_argument("--noise_std", type=float, default=0.01,
+                               help="Std for AddGaussianNoise augmentation.")
+    augment_group.add_argument("--noise_p", type=float, default=0.1,
+                               help="Probability for AddGaussianNoise augmentation.")
     # Training
     train_group = parser.add_argument_group("Training")
     train_group.add_argument("--retrain", action="store_true", help="Does not load weights even if available")
@@ -242,6 +256,10 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
     train_group.add_argument("--checkpoint_iteration", type=int, default=10,
                              help="Save separate .pth file after several epochs")
     add_keep(train_group)
+    train_group.add_argument("--skip_best_model_eval", action=ParseBool, default=False,
+                             help="If true, skip end-of-training evaluation that loads best_model.pth and runs inference "
+                                  "over the full TRAINING loader (two forward passes per batch + plots). "
+                                  "This is not the same as periodic validation on val_loader; it is often much slower.")
     train_group.add_argument("--eval_iteration", type=int, default=3,
                              help="Run model on full validation set after several epochs")
     train_group.add_argument("--full_eval", action="store_true", help="Apply UV evaluation also during training")
@@ -506,6 +524,13 @@ def add_split(parser):
 def add_dataset(parser):
     parser.add_argument("--dataset", type=Dataset, choices=list(Dataset), required=True,
                         help="Specify the dataset here")
+    parser.add_argument(
+        "--dataset_ttpla",
+        type=str,
+        default=None,
+        help="TTPLA root with images/{train,val,test}/ and labels/... Uses DATASET_TTPLA env when set; "
+             "otherwise this path is applied (experiment yaml friendly).",
+    )
 
 
 def add_num_predictors(parser):

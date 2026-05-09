@@ -1,5 +1,9 @@
+# exp19: exp10 baseline + predictor 수 축소(8 -> 4) 검증.
+# 가설: predictor가 각도 후보가 아니라 셀 내 최대 line 수를 커버하는 용도라면 4개로도 충분할 수 있음.
 dataset: "ttpla"
-run_name: "exp07_convnext_strict_hard_1024"
+dataset_ttpla: "/home/work/caps_drone/yolino/ttpla_yolino_dataset_1024_downsample"
+run_name: "exp19_fpn_bottomup_p4_num_predictors4_1024"
+loggers: [ file, tb ]
 
 batch_size: 8
 epoch: 50
@@ -8,8 +12,11 @@ img_height: 1024
 scale: 32
 head_level: P4
 backbone: convnext
-use_fpn: false
+use_fpn: true
+use_bottom_up: true
 backbone_pretrained: True
+
+num_predictors: 4
 
 training_variables: geom,confidence
 activations: linear,sigmoid
@@ -19,13 +26,8 @@ weights: "2,1"
 conf_match_weight: 1,10
 confidence: 0.5
 
-loggers: ["file", "tb"]
-metrics: [f1, precision, recall, accuracy, tp, fn, tn, fp]
-log_duplicate_metrics: false
-log_strict_metrics: false
-
 loss_hard_matching: true
-match_by_conf_first: false
+match_by_conf_first: true
 use_conf_in_loss_matching: false
 
 amp: false

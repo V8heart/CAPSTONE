@@ -84,8 +84,8 @@ class DatasetTransformer:
         self.blur_kernel = (3, 3)
         self.blur_sigma = (0.1, 0.8)
         self.blur_p = 0.1
-        self.noise_std = 0.01
-        self.noise_p = 0.1
+        self.noise_std = float(getattr(args, "noise_std", 0.01))
+        self.noise_p = float(getattr(args, "noise_p", 0.1))
 
         self.plot = args.plot
 

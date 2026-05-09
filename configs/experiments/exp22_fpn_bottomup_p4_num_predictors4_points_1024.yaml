@@ -1,5 +1,10 @@
+# exp22: exp19 baseline + geometry output을 endpoint(points)로 변경.
+# - md(midpoint+direction) 대신 points(x1,y1,x2,y2) 직접 회귀
+# - num_predictors=4 유지
 dataset: "ttpla"
-run_name: "exp05test"
+dataset_ttpla: "/home/work/caps_drone/yolino/ttpla_yolino_dataset_1024_downsample"
+run_name: "exp22_fpn_bottomup_p4_num_predictors4_points_1024"
+loggers: [ file, tb ]
 
 batch_size: 8
 epoch: 50
@@ -8,8 +13,14 @@ img_height: 1024
 scale: 32
 head_level: P4
 backbone: convnext
-use_fpn: false
+use_fpn: true
+use_bottom_up: true
 backbone_pretrained: True
+
+linerep: points
+anchors: none
+anchor_vars: points
+num_predictors: 4
 
 training_variables: geom,confidence
 activations: linear,sigmoid
@@ -24,7 +35,7 @@ match_by_conf_first: true
 use_conf_in_loss_matching: false
 
 amp: false
-loading_workers: 4
+loading_workers: 2
 augment: crop,rotation,jitter,erasing,noise,normalize
 keep: "True"
 checkpoint_iteration: "1"

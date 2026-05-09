@@ -1,0 +1,64 @@
+# exp10 체크포인트에서 Sample_YOLinO 로 fine-tune.
+#
+# 데이터: Sample_YOLinO (dual L/R 크롭 기준 train ~68 / val ~18 타일).
+#   - 환경변수 DATASET_TTPLA 가 설정되어 있으면 그 경로가 우선입니다.
+#   - 비어 있으면 아래 dataset_ttpla 경로가 자동으로 DATASET_TTPLA 로 설정됩니다.
+#
+# 체크포인트: 검증 F1이 가장 높았던 epoch 가중치 사용 권장.
+#   - 해당 파일: <dvc>/log/checkpoints/exp10_fpn_bottomup_p4_1024/epXXXX_model.pth
+# CLI 예: --explicit_model log/checkpoints/exp10_fpn_bottomup_p4_1024/ep0042_model.pth
+#
+# 파인튜닝: 소량 타일이라 LR은 낮게 유지. 전선 색(흰→검) 등 도메인 변화로 백본 동결은 쓰지 않고
+#   backbone_freeze_epochs=0 + lr_backbone < learning_rate 로 전체를 완만하게 학습.
+#
+dataset: "ttpla"
+# Repo 루트(yolino) 기준 빌드 결과물; 다른 위치면 절대경로로 바꾸세요.
+dataset_ttpla: "/home/work/caps_drone/yolino/Sample_YOLinO"
+
+run_name: "exp14_finetune_sample_yolino_from_exp10_1024"
+loggers: [ file, tb ]
+
+batch_size: 12
+epoch: 50
+img_height: 1024
+
+learning_rate: 0.00005
+lr_backbone: 0.00001
+lr_fpn: 0.00005
+lr_geom: 0.00005
+backbone_freeze_epochs: 0
+patience: 10
+
+scale: 32
+head_level: P4
+backbone: convnext
+use_fpn: true
+use_bottom_up: true
+backbone_pretrained: True
+
+training_variables: geom,confidence
+activations: linear,sigmoid
+loss: norm_mean,mse_mean
+loss_weight_strategy: fixed
+weights: "2,1"
+conf_match_weight: 1,10
+confidence: 0.5
+
+loss_hard_matching: true
+match_by_conf_first: true
+use_conf_in_loss_matching: false
+
+anchors: none
+anchor_vars: midpoint,direction
+
+amp: false
+loading_workers: 2
+augment: crop,rotation,jitter,erasing,noise,normalize
+keep: "True"
+checkpoint_iteration: "1"
+eval_iteration: "1"
+
+skip_best_model_eval: true
+
+# --dvc 기준 상대경로로 결합됨 (general_setup). 실행 전 최고 F1 epoch으로 교체할 것.
+explicit_model: log/checkpoints/exp10_fpn_bottomup_p4_1024/ep0031_model.pth

@@ -1,5 +1,9 @@
+# exp10과 동일 백본(FPN+P4 bottom-up) + EQUAL 앵커에서 direction만 사용(셀 중심 고정, 8방향 고정 벡터 슬롯).
+# anchors.py의 __generate_directions__(8)와 매칭되도록 num_predictors: 8 유지.
 dataset: "ttpla"
-run_name: "exp05test"
+dataset_ttpla: "/home/work/caps_drone/yolino/ttpla_yolino_dataset_1024_downsample"
+run_name: "exp13_fpn_bottomup_p4_equal_direction_1024"
+loggers: [ file, tb ]
 
 batch_size: 8
 epoch: 50
@@ -8,8 +12,14 @@ img_height: 1024
 scale: 32
 head_level: P4
 backbone: convnext
-use_fpn: false
+use_fpn: true
+use_bottom_up: true
 backbone_pretrained: True
+
+linerep: md
+anchors: equal
+anchor_vars: direction
+offset: True
 
 training_variables: geom,confidence
 activations: linear,sigmoid
@@ -22,6 +32,8 @@ confidence: 0.5
 loss_hard_matching: true
 match_by_conf_first: true
 use_conf_in_loss_matching: false
+
+num_predictors: 8
 
 amp: false
 loading_workers: 4

@@ -1,11 +1,19 @@
-# exp05와 동일 + top-down FPN + P4 전용 bottom-up 융합 (scale=32, head_level=P4 유지).
+# exp21: exp19 조건 그대로 + exp19 ep0041 가중치로 Sample_YOLinO_tiled_1024 파인튜닝.
 dataset: "ttpla"
-run_name: "exp10_fpn_bottomup_p4_1024"
+dataset_ttpla: "/home/work/caps_drone/yolino/Sample_YOLinO_tiled_1024"
+run_name: "exp21_tile_finetune_sample_from_exp19_ep41_e80"
+loggers: [ file, tb ]
 
 batch_size: 8
-epoch: 50
+epoch: 80
 img_height: 1024
-loggers: [ file, tb ]
+
+learning_rate: 0.00005
+lr_backbone: 0.00001
+lr_fpn: 0.00005
+lr_geom: 0.00005
+backbone_freeze_epochs: 0
+patience: 10
 
 scale: 32
 head_level: P4
@@ -13,6 +21,8 @@ backbone: convnext
 use_fpn: true
 use_bottom_up: true
 backbone_pretrained: True
+
+num_predictors: 4
 
 training_variables: geom,confidence
 activations: linear,sigmoid
@@ -27,10 +37,11 @@ match_by_conf_first: true
 use_conf_in_loss_matching: false
 
 amp: false
-loading_workers: 4
+loading_workers: 2
 augment: crop,rotation,jitter,erasing,noise,normalize
 keep: "True"
 checkpoint_iteration: "1"
 eval_iteration: "1"
 
 skip_best_model_eval: true
+explicit_model: log/checkpoints/exp19_fpn_bottomup_p4_num_predictors4_1024/ep0041_model.pth

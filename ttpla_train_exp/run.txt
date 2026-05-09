@@ -138,3 +138,52 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
 --rdzv_endpoint=127.0.0.1:29611 --rdzv_id=base_match_strict_hard_dn_nofpn \
 --run_name base_ds_dn_nofpn_strict_hard --loss norm_mean,mse_mean \
 --loss_hard_matching true --match_by_conf_first false --use_conf_in_loss_matching false
+
+
+## 6) CAPSTONE smoke test setup (exp05/06/07/08)
+# Purpose:
+# - Minimal 1-epoch train/val smoke run for each experiment config.
+# - Confirm validation pipeline + logging keys are emitted without crash.
+# - Continue to next config even if one fails.
+#
+# Repo:
+# - /home/work/caps_drone/yolino/CAPSTONE
+#
+# Dataset:
+# - /home/work/caps_drone/yolino/ttpla_yolino_dataset_1024_downsample
+#
+# 6-0) Pre-run environment setup (copy/paste once per shell)
+cd /home/work/caps_drone/yolino/CAPSTONE
+export DATASET_TTPLA=/home/work/caps_drone/yolino/ttpla_yolino_dataset_1024_downsample
+export YOLINO_IGNORE_DIRTY=true
+export PYTHONPATH=/home/work/caps_drone/yolino/CAPSTONE/src:${PYTHONPATH}
+
+# Optional: pre-cache ConvNeXt pretrained weights once
+python - <<'PY'
+from torchvision.models import convnext_tiny, ConvNeXt_Tiny_Weights
+convnext_tiny(weights=ConvNeXt_Tiny_Weights.DEFAULT)
+print("convnext_tiny pretrained cached")
+PY
+
+# 6-1) Smoke loop (exp05~08)
+# IMPORTANT:
+# - Do NOT call `python src/yolino/train.py` directly for these configs.
+# - Use `bash run.sh ...` so configargparse gets the full experiment config correctly.
+for cfg in \
+  configs/experiments/exp05_convnext_baseline_1024.yaml \
+  configs/experiments/exp06_convnext_focal_1k.yaml \
+  configs/experiments/exp07_convnext_strict_hard_1k.yaml \
+  configs/experiments/exp08_convnext_focal_strict_hard_1k.yaml
+do
+  echo "===== SMOKE: ${cfg} ====="
+  bash run.sh \
+    --config "${cfg}" \
+    --dataset-root "/home/work/caps_drone/yolino/ttpla_yolino_dataset_1024_downsample" \
+    --log-dir "ttpla_smoke_1024" \
+    -- --run_name "smoke_$(basename "${cfg}" .yaml)" \
+       --epoch 1 \
+       --eval_iteration 1 \
+       --checkpoint_iteration 1 \
+       --retrain \
+    || echo "[WARN] ${cfg} failed, continue"
+done

@@ -1,0 +1,42 @@
+# exp10 동일 구조(FPN + bottom-up P4) + confidence만 focal loss (exp06 계열).
+# 데이터: ttpla_yolino_dataset_1024_downsample — run.sh --dataset-root 또는 DATASET_TTPLA 우선, 없으면 dataset_ttpla.
+dataset: "ttpla"
+dataset_ttpla: "/home/work/caps_drone/yolino/ttpla_yolino_dataset_1024_downsample"
+run_name: "exp11_fpn_bottomup_p4_focal_1024"
+loggers: [ file, tb ]
+
+batch_size: 8
+epoch: 50
+img_height: 1024
+
+scale: 32
+head_level: P4
+backbone: convnext
+use_fpn: true
+use_bottom_up: true
+backbone_pretrained: True
+
+training_variables: geom,confidence
+activations: linear,sigmoid
+loss: norm_mean,focal_mean
+loss_weight_strategy: fixed
+weights: "2,1"
+# focal_alpha와 과도한 negative 가중은 양쪽 모두 positive 쪽 기여를 키워 focal 미세 조정이 묻힐 수 있음 → logits focal에 맞춰 완화
+conf_match_weight: 1,2.5
+confidence: 0.5
+
+focal_gamma: 1.0
+focal_alpha: 0.5
+
+loss_hard_matching: true
+match_by_conf_first: true
+use_conf_in_loss_matching: false
+
+amp: false
+loading_workers: 4
+augment: crop,rotation,jitter,erasing,noise,normalize
+keep: "True"
+checkpoint_iteration: "1"
+eval_iteration: "1"
+
+skip_best_model_eval: true

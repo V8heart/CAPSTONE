@@ -35,6 +35,10 @@ except ImportError:  # older torchvision
     ConvNeXt_Tiny_Weights = None  # type: ignore
     _HAS_NEW_TV_API = False
 from torchvision.models.feature_extraction import create_feature_extractor
+try:
+    import timm
+except ImportError:  # optional dependency, only needed when --backbone=timm
+    timm = None
 
 
 class ChannelAttention(nn.Module):
@@ -150,6 +154,127 @@ class BottomUpFuseToP4(nn.Module):
         x = self.down_p3_to_p4(x) + m4
         x = self.norm_bu4(self.smooth_bu4(x))
         return x
+
+
+class Timm_FPN_Backbone(nn.Module):
+    """
+    Generic timm backbone + FPN wrapper exposing the same output contract as
+    ConvNeXt_FPN_Backbone: {"P2","P3","P4"} with strides (8, 16, 32/16).
+    """
+
+    _SUPPORTED = ("resnet50_dilated", "hrnet_w32")
+
+    def __init__(self,
+                 model_name: str = "resnet50_dilated",
+                 pretrained: bool = True,
+                 upsample_mode: str = "nearest",
+                 out_channels: int = 256,
+                 use_fpn: bool = True,
+                 use_bottom_up: bool = False,
+                 force_stride32_head: bool = False):
+        super().__init__()
+        if timm is None:
+            raise ImportError(
+                "timm is required for --backbone=timm. Install with `pip install timm`.")
+
+        if model_name not in self._SUPPORTED:
+            raise ValueError("Unsupported timm model %r. Supported: %s"
+                             % (model_name, list(self._SUPPORTED)))
+
+        self.model_name = model_name
+        self.out_channels = int(out_channels)
+        self.use_fpn = bool(use_fpn)
+        self.use_bottom_up = bool(use_bottom_up)
+        self.force_stride32_head = bool(force_stride32_head)
+        if upsample_mode not in ("nearest", "bilinear"):
+            raise ValueError("upsample_mode must be 'nearest' or 'bilinear', got %r" % upsample_mode)
+        self.upsample_mode = upsample_mode
+
+        if model_name == "resnet50_dilated":
+            self.body = timm.create_model(
+                "resnet50",
+                pretrained=pretrained,
+                features_only=True,
+                out_indices=(1, 2, 3),
+                output_stride=16,
+            )
+        else:  # hrnet_w32
+            self.body = timm.create_model(
+                "hrnet_w32",
+                pretrained=pretrained,
+                features_only=True,
+                out_indices=(1, 2, 3),
+            )
+
+        in_channels = list(self.body.feature_info.channels())
+        if len(in_channels) != 3:
+            raise ValueError("Expected 3 feature maps from timm %s, got %d (%s)"
+                             % (model_name, len(in_channels), in_channels))
+        self.C2_CH, self.C3_CH, self.C4_CH = int(in_channels[0]), int(in_channels[1]), int(in_channels[2])
+
+        self.lateral_c2 = nn.Conv2d(self.C2_CH, self.out_channels, kernel_size=1)
+        self.lateral_c3 = nn.Conv2d(self.C3_CH, self.out_channels, kernel_size=1)
+        self.lateral_c4 = nn.Conv2d(self.C4_CH, self.out_channels, kernel_size=1)
+
+        self.smooth_p2 = nn.Conv2d(self.out_channels, self.out_channels, kernel_size=3, padding=1)
+        self.smooth_p3 = nn.Conv2d(self.out_channels, self.out_channels, kernel_size=3, padding=1)
+        self.smooth_p4 = nn.Conv2d(self.out_channels, self.out_channels, kernel_size=3, padding=1)
+
+        gn_groups = 32 if self.out_channels % 32 == 0 else 16
+        self.smooth_norm_p2 = nn.GroupNorm(gn_groups, self.out_channels)
+        self.smooth_norm_p3 = nn.GroupNorm(gn_groups, self.out_channels)
+        self.smooth_norm_p4 = nn.GroupNorm(gn_groups, self.out_channels)
+
+        for m in (self.lateral_c2, self.lateral_c3, self.lateral_c4,
+                  self.smooth_p2, self.smooth_p3, self.smooth_p4):
+            nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+        self.bottom_up = BottomUpFuseToP4(self.out_channels) if self.use_bottom_up else None
+        self.head_downsample = None
+        if self.force_stride32_head:
+            # Simple down-projection: keep high-res backbone path, create a larger-stride head map.
+            self.head_downsample = nn.Sequential(
+                nn.Conv2d(self.out_channels, self.out_channels, kernel_size=3, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(self.out_channels),
+                nn.GELU(),
+            )
+
+    def _upsample_to(self, x: torch.Tensor, size) -> torch.Tensor:
+        if self.upsample_mode == "nearest":
+            return F.interpolate(x, size=size, mode="nearest")
+        return F.interpolate(x, size=size, mode="bilinear", align_corners=False)
+
+    def forward(self, x: torch.Tensor):
+        c2, c3, c4 = self.body(x)
+
+        m4 = self.lateral_c4(c4)
+        m3 = self.lateral_c3(c3)
+        m2 = self.lateral_c2(c2)
+
+        if self.use_fpn:
+            m3 = m3 + self._upsample_to(m4, c3.shape[-2:])
+            m2 = m2 + self._upsample_to(m3, c2.shape[-2:])
+
+        p3 = self.smooth_norm_p3(self.smooth_p3(m3))
+        p2 = self.smooth_norm_p2(self.smooth_p2(m2))
+        if self.bottom_up is not None:
+            p4 = self.bottom_up(p2, m3, m4)
+        else:
+            p4 = self.smooth_norm_p4(self.smooth_p4(m4))
+        p5 = self.head_downsample(p4) if self.head_downsample is not None else None
+
+        if p5 is None:
+            Log.debug("TimmBackbone[%s] feats: C2=%s C3=%s C4=%s | P2=%s P3=%s P4=%s"
+                      % (self.model_name, tuple(c2.shape), tuple(c3.shape), tuple(c4.shape),
+                         tuple(p2.shape), tuple(p3.shape), tuple(p4.shape)))
+            return {"P2": p2, "P3": p3, "P4": p4}
+
+        Log.debug("TimmBackbone[%s] feats: C2=%s C3=%s C4=%s | P2=%s P3=%s P4=%s P5=%s"
+                  % (self.model_name, tuple(c2.shape), tuple(c3.shape), tuple(c4.shape),
+                     tuple(p2.shape), tuple(p3.shape), tuple(p4.shape), tuple(p5.shape)))
+        return {"P2": p2, "P3": p3, "P4": p4, "P5": p5}
 
 
 # --------------------------------------------------------------------------- #
@@ -428,7 +553,7 @@ class YolinoNet(nn.Module):
     """
 
     # Map "FPN level -> stride" for sanity checks against args.scale.
-    _LEVEL_TO_STRIDE = {"P2": 8, "P3": 16, "P4": 32}
+    _LEVEL_TO_STRIDE = {"P2": 8, "P3": 16, "P4": 32, "P5": 32}
 
     def __init__(self, args, coords):
         super().__init__()
@@ -471,8 +596,20 @@ class YolinoNet(nn.Module):
                 use_fpn=use_fpn,
                 use_bottom_up=use_bottom_up,
             )
+        elif backbone_name == "timm":
+            timm_model_name = str(getattr(args, "timm_model_name", "resnet50_dilated")).lower()
+            timm_force_stride32_head = bool(getattr(args, "timm_force_stride32_head", False))
+            self.backbone = Timm_FPN_Backbone(
+                model_name=timm_model_name,
+                pretrained=pretrained,
+                upsample_mode=upsample_mode,
+                out_channels=fpn_out,
+                use_fpn=use_fpn,
+                use_bottom_up=use_bottom_up,
+                force_stride32_head=timm_force_stride32_head,
+            )
         else:
-            raise ValueError("Unknown --backbone=%r (expected 'convnext' or 'darknet')"
+            raise ValueError("Unknown --backbone=%r (expected 'convnext' or 'darknet' or 'timm')"
                              % backbone_name)
         Log.info("YolinoNet backbone=%s, use_fpn=%s, use_bottom_up=%s, fpn_out=%d, head_level=%s"
                  % (backbone_name, str(use_fpn), str(use_bottom_up), fpn_out,
@@ -530,6 +667,11 @@ class YolinoNet(nn.Module):
                 where cells = (H/stride) * (W/stride) for the chosen FPN head level.
         """
         feats = self.backbone(x)
+        if self.head_level not in feats:
+            raise ValueError("Requested head_level=%s but backbone returned %s. "
+                             "For timm with stride-16 top level, enable --timm_force_stride32_head=True "
+                             "and use --head_level=P5 for a stride-32 head map."
+                             % (self.head_level, sorted(list(feats.keys()))))
         x = feats[self.head_level]  # default: P3 (1/16, fpn_out channels)
 
         mode = self.feature_refine

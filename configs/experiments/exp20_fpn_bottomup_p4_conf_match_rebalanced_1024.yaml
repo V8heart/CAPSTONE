@@ -1,0 +1,42 @@
+# exp20: exp10 동일 + confidence match 가중 재조정.
+#
+# 8 predictor = 셀당 최대 선분 용량 가정일 때, 대부분의 슬롯은 비어 있고 GT-positive 슬롯은 상대적으로 적다.
+# exp10의 (1, 10)은 배경(비매칭) 쪽 gradient가 커서 전반적인 conf가 눌리기 쉬움(저신호 recall 비용).
+# 여기서는 매칭된 슬롯의 confidence 학습을 상대적으로 키우고 배경 압력은 완화: (4, 6).
+# 기대: matched conf 분포 상단·threshold 고정 시 recall/F1 개선 여지 (precision은 모니터링).
+dataset: "ttpla"
+dataset_ttpla: "/home/work/caps_drone/yolino/ttpla_yolino_dataset_1024_downsample"
+run_name: "exp20_fpn_bottomup_p4_conf_match_rebalanced_1024"
+loggers: [ file, tb ]
+
+batch_size: 8
+epoch: 50
+img_height: 1024
+
+scale: 32
+head_level: P4
+backbone: convnext
+use_fpn: true
+use_bottom_up: true
+backbone_pretrained: True
+
+training_variables: geom,confidence
+activations: linear,sigmoid
+loss: norm_mean,mse_mean
+loss_weight_strategy: fixed
+weights: "2,1"
+conf_match_weight: 4,6
+confidence: 0.5
+
+loss_hard_matching: true
+match_by_conf_first: true
+use_conf_in_loss_matching: false
+
+amp: false
+loading_workers: 4
+augment: crop,rotation,jitter,erasing,noise,normalize
+keep: "True"
+checkpoint_iteration: "1"
+eval_iteration: "1"
+
+skip_best_model_eval: true

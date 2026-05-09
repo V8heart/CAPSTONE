@@ -81,7 +81,8 @@ class LineDuplicates:
 
     def height(self):
         if not torch.any(self.__total_per_cell__):
-            return -1, -1, -1
+            # Must be tensors so DataLoader default_collate can stack batches (ints break collate_tensor_fn).
+            return torch.tensor(-1.0), torch.tensor(-1, dtype=torch.long), torch.tensor(-1, dtype=torch.long)
 
         dupl_per_row = torch.sum(torch.sum(self.__total_per_cell__, dim=1), dim=1)
         valid_rows = torch.where(dupl_per_row > 0)[0]
