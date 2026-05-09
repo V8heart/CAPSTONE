@@ -77,12 +77,13 @@ def main():
     trainer.optimizer.zero_grad(set_to_none=True)
 
     with torch.autograd.detect_anomaly():
-        geom_preds, embed_preds = trainer.forward(images, is_train=True, epoch=0, first_run=False)
+        geom_preds, embed_preds, geom_logits = trainer.forward(images, is_train=True, epoch=0, first_run=False)
     print(f"geom_preds shape={tuple(geom_preds.shape)} finite={torch.isfinite(geom_preds).all().item()}")
     print(f"embed_preds shape={tuple(embed_preds.shape)} finite={torch.isfinite(embed_preds).all().item()}")
     with torch.autograd.detect_anomaly():
         losses, sum_loss, mean_losses = trainer.loss(
-            gts.to(args.cuda), geom_preds, embed_preds, [name], epoch=0, tag="debug"
+            gts.to(args.cuda), geom_preds, embed_preds, [name], epoch=0, tag="debug",
+            geom_logits=geom_logits,
         )
     print(f"sum_loss={sum_loss.detach().item()} finite={torch.isfinite(sum_loss).item()}")
     print(f"loss_components={losses}")

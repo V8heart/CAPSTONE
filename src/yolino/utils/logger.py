@@ -353,7 +353,13 @@ class Log():
             elif type(v).__name__ == 'dict':
                 for sub_k, sub_v in v.items():
                     new_dict[str(k) + "_" + str(sub_k) + "/" + tag] = sub_v
-            # 3. 값이 단순 숫자인 경우 (기존 로직)
+            # 3. torch 텐서: 그래프/디바이스에 붙은 채 TB에 넘기면 참조가 남거나 메모리가 불안정해질 수 있음 → 스칼라만 기록
+            elif isinstance(v, torch.Tensor):
+                if v.numel() == 1:
+                    new_dict[str(k) + "/" + tag] = v.detach().float().cpu().item()
+                else:
+                    Log.info("Miss to push %s: non-scalar tensor shape=%s" % (k, tuple(v.shape)))
+            # 4. 단순 숫자 등
             else:
                 new_dict[str(k) + "/" + tag] = v
 

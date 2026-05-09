@@ -1,0 +1,53 @@
+# exp16: exp15 baseline + augmentation 완화
+# - erasing 제거
+# - noise 강도 완화(noise_std/noise_p)
+dataset: "ttpla"
+dataset_ttpla: "/home/work/caps_drone/yolino/Sample_YOLinO_tiled_1024"
+
+run_name: "exp16_tile_finetune_sample_aug_relaxed_e80"
+loggers: [ file, tb ]
+
+batch_size: 8
+epoch: 80
+img_height: 1024
+
+learning_rate: 0.00005
+lr_backbone: 0.00001
+lr_fpn: 0.00005
+lr_geom: 0.00005
+backbone_freeze_epochs: 0
+patience: 10
+
+scale: 32
+head_level: P4
+backbone: convnext
+use_fpn: true
+use_bottom_up: true
+backbone_pretrained: True
+
+training_variables: geom,confidence
+activations: linear,sigmoid
+loss: norm_mean,mse_mean
+loss_weight_strategy: fixed
+weights: "2,1"
+conf_match_weight: 1,10
+confidence: 0.5
+
+loss_hard_matching: true
+match_by_conf_first: true
+use_conf_in_loss_matching: false
+
+anchors: none
+anchor_vars: midpoint,direction
+
+amp: false
+loading_workers: 2
+augment: crop,rotation,jitter,noise,normalize
+noise_std: 0.005
+noise_p: 0.05
+keep: "True"
+checkpoint_iteration: "1"
+eval_iteration: "1"
+
+skip_best_model_eval: true
+explicit_model: log/checkpoints/exp15_tile_finetune_sample_e40/ep0040_model.pth

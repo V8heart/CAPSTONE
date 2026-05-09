@@ -1,0 +1,21 @@
+activations: '[linear, sigmoid]'
+anchor_vars: '[midpoint, direction]'
+anchors: none
+association_metric: euclidean
+augment: '[crop, rotation, jitter, erasing, noise, normalize]'
+conf_match_weight: '[1.0, 10.0]'
+confidence: '0.5'
+crop_range: '0.17'
+darknet_cfg: /home/work/caps_drone/yolino/CAPSTONE/src/yolino/model/cfg/darknet19_448_d1.cfg
+learning_rate: 5e-05
+linerep: md
+loss: '[norm_mean, mse_mean]'
+loss_weight_strategy: fixed
+matching_gate: '1.0'
+num_predictors: '4'
+offset: 'True'
+optimizer: adam
+rotation_range: '0.01'
+scale: '32'
+training_variables: '[geom, confidence]'
+weights: '[2.0, 1.0]'

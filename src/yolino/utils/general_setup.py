@@ -36,7 +36,7 @@ import torch
 
 from yolino.utils.argparser import generate_argparse
 from yolino.viz.translation import experiment_param_keys
-from yolino.utils.enums import TaskType, Logger, AnchorDistribution, LINE, AnchorVariables
+from yolino.utils.enums import Dataset, TaskType, Logger, AnchorDistribution, LINE, AnchorVariables
 from yolino.utils.gpu import getCuda
 from yolino.utils.logger import Log
 from yolino.utils.paths import Paths
@@ -81,6 +81,22 @@ def __push_commit__(root, ignore_dirty=False):
         else:
             raise ValueError("Git repo is dirty!")
     return params
+
+
+def __apply_dataset_ttpla_from_config__(args):
+    """Populate DATASET_TTPLA from yaml when the env var is unset (TTPLA runs)."""
+    if args.dataset != Dataset.TTPLA:
+        return
+    ttpla_root = getattr(args, "dataset_ttpla", None)
+    if ttpla_root is None or str(ttpla_root).strip() == "":
+        return
+    if os.getenv("DATASET_TTPLA"):
+        return
+    root_path = os.path.abspath(os.path.expanduser(str(ttpla_root)))
+    if not os.path.isdir(root_path):
+        Log.warning("dataset_ttpla path does not exist or is not a directory: %s" % root_path)
+    os.environ["DATASET_TTPLA"] = root_path
+    Log.info("DATASET_TTPLA set from config: %s" % root_path)
 
 
 def validate_args(args):
@@ -150,6 +166,8 @@ def general_setup(name, config_file="params.yaml", ignore_cmd_args=False, altern
                                  ignore_cmd_args=ignore_cmd_args, alternative_args=alternative_args)
     else:
         args = preloaded_argparse
+
+    __apply_dataset_ttpla_from_config__(args)
 
     # ------------------------------------------------------------
     # Option A: INSTANCE는 geom head에서 제거하고 embed head가 독점

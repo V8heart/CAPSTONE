@@ -1,7 +1,7 @@
 dataset: "ttpla"
 run_name: "exp06_convnext_focal_1024"
 
-batch_size: 10
+batch_size: 8
 epoch: 50
 img_height: 1024
 
@@ -37,3 +37,5 @@ augment: crop,rotation,jitter,erasing,noise,normalize
 keep: "True"
 checkpoint_iteration: "1"
 eval_iteration: "1"
+
+skip_best_model_eval: true

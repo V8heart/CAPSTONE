@@ -1,5 +1,9 @@
+# exp10 동일 구조 + loss 매칭에서 match_by_conf_first=false (exp07 계열 “strict”).
+# 한 셀 안에서는 신뢰도 임계값으로 predictor를 거르지 않고 전 predictor가 기하 거리 매칭에 참여.
 dataset: "ttpla"
-run_name: "exp07_convnext_strict_hard_1024"
+dataset_ttpla: "/home/work/caps_drone/yolino/ttpla_yolino_dataset_1024_downsample"
+run_name: "exp12_fpn_bottomup_p4_strict_match_1024"
+loggers: [ file, tb ]
 
 batch_size: 8
 epoch: 50
@@ -8,7 +12,8 @@ img_height: 1024
 scale: 32
 head_level: P4
 backbone: convnext
-use_fpn: false
+use_fpn: true
+use_bottom_up: true
 backbone_pretrained: True
 
 training_variables: geom,confidence
@@ -19,14 +24,9 @@ weights: "2,1"
 conf_match_weight: 1,10
 confidence: 0.5
 
-loggers: ["file", "tb"]
-metrics: [f1, precision, recall, accuracy, tp, fn, tn, fp]
-log_duplicate_metrics: false
-log_strict_metrics: false
-
 loss_hard_matching: true
 match_by_conf_first: false
-use_conf_in_loss_matching: false
+use_conf_in_loss_matching: true
 
 amp: false
 loading_workers: 4

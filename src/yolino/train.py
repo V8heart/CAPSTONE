@@ -20,6 +20,7 @@
 # ---------------------------------------------------------------------------- #
 import timeit
 import os
+import sys
 
 import torch
 from tqdm import tqdm
@@ -56,19 +57,33 @@ if __name__ == "__main__":
 
         if args.gpu:
             if args.gpu_id >= 0:
-                import os
-
                 os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
                 torch.cuda.set_device(args.gpu_id)
-            Log.error(torch.cuda.is_available())
-            Log.error(torch.cuda.current_device())
-            for i in range(torch.cuda.device_count()):
-                Log.error(torch.cuda.device(i))
-                Log.error(torch.cuda.get_device_name(i))
+            Log.debug(
+                "CUDA: available=%s current_device=%d count=%d name=%s"
+                % (
+                    torch.cuda.is_available(),
+                    torch.cuda.current_device(),
+                    torch.cuda.device_count(),
+                    torch.cuda.get_device_name(0) if torch.cuda.device_count() else "n/a",
+                )
+            )
 
         if args.is_main_process:
             Log.time(key="setup", value=(timeit.default_timer() - start))
+        # Last completed epoch index (for on_training_finished). If no training loop runs (e.g. resumed
+        # at epoch == args.epoch), use model_epoch - 1 so `epoch` is always defined.
+        last_trained_epoch = max(int(trainer.model_epoch) - 1, -1)
+        if int(trainer.model_epoch) >= int(args.epoch):
+            Log.error(
+                "No training epochs to run: checkpoint epoch=%d but --epoch=%d (train loop is "
+                "range(checkpoint_epoch, epoch), exclusive end). Increase --epoch (e.g. fine-tune smoke: "
+                "--epoch %d when resuming from this checkpoint)."
+                % (trainer.model_epoch, args.epoch, int(trainer.model_epoch) + 1)
+            )
+            sys.exit(1)
         for epoch in range(trainer.model_epoch, args.epoch):
+            last_trained_epoch = epoch
             epoch_start = timeit.default_timer()
 
             if args.is_main_process:
@@ -177,7 +192,7 @@ if __name__ == "__main__":
 
         finish_start = timeit.default_timer()
         if args.is_main_process:
-            trainer.on_training_finished(epoch=epoch, do_nms=args.nms)
+            trainer.on_training_finished(epoch=last_trained_epoch, do_nms=args.nms)
             Log.time(key="finish", value=timeit.default_timer() - finish_start)
         if args.distributed:
             torch.distributed.destroy_process_group()

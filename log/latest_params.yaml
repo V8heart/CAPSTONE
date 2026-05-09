@@ -1,0 +1,121 @@
+activations: '[linear, sigmoid]'
+adjacency_threshold: '768.0'
+amp: 'False'
+anchor_vars: '[midpoint, direction]'
+anchors: none
+association_metric: euclidean
+augment: '[crop, rotation, jitter, erasing, noise, normalize]'
+backbone: convnext
+backbone_freeze_epochs: '0'
+backbone_pretrained: 'True'
+batch_size: '8'
+best_mean_loss: 'True'
+cbam_reduction_ratio: '16'
+cell_size: '[32, 32]'
+checkpoint_iteration: '1'
+conf_match_weight: '[1.0, 10.0]'
+conf_negative_weight: '1.0'
+confidence: '0.5'
+config: configs/experiments/exp21_tile_finetune_sample_from_exp19_ep41_1024.yaml
+crop_range: '0.17'
+cuda: cuda:0
+darknet_cfg: /home/work/caps_drone/yolino/CAPSTONE/src/yolino/model/cfg/darknet19_448_d1.cfg
+darknet_weights: /home/work/caps_drone/yolino/CAPSTONE/src/yolino/model/cfg/darknet19_448.weights
+dataset: ttpla
+dataset_ttpla: /home/work/caps_drone/yolino/Sample_YOLinO_tiled_1024
+ddp_find_unused_parameters: 'False'
+debug_tool_name: infer-bench-full
+decay_rate: '0.0001'
+dvc: /home/work/caps_drone/yolino/CAPSTONE
+earliest_stop: '5'
+embed_dim: '8'
+embedding_concat_geom_dims: '0'
+embedding_delta_d: '3.0'
+embedding_delta_v: '0.5'
+embedding_lambda_reg: '0.0'
+embedding_loss_warmup_epochs: '0'
+epoch: '80'
+eps: '40.0'
+eval_iteration: '1'
+explicit: None
+explicit_model: /home/work/caps_drone/yolino/CAPSTONE/log/checkpoints/exp19_fpn_bottomup_p4_num_predictors4_1024/ep0041_model.pth
+feature_refine: sa_embed_only
+focal_alpha: '0.25'
+focal_gamma: '2.0'
+fpn_out_channels: '256'
+fpn_upsample_mode: nearest
+full_eval: 'False'
+gpu: 'True'
+gpu_id: '0'
+grad_clip_norm: '5.0'
+grid_shape: '[32 32]'
+head_level: P4
+id: exp21_tile_finetune_sample_from_exp19_ep41_e80
+ignore_missing: 'False'
+img_height: '1024'
+img_size: '[1024, 1024]'
+instance_embedding_activation: None
+instance_embedding_loss: None
+instance_embedding_weight: None
+keep: 'True'
+learning_rate: 5e-05
+level: WARN
+linerep: md
+loading_workers: '2'
+log_dir: argo_po_8p_dn19
+log_duplicate_metrics: 'False'
+log_strict_metrics: 'False'
+loggers: '[file, tb]'
+loss: '[norm_mean, mse_mean]'
+loss_hard_matching: 'True'
+loss_weight_strategy: fixed
+lr_backbone: 1e-05
+lr_embed: None
+lr_fpn: 5e-05
+lr_geom: 5e-05
+lw: '1.0'
+match_by_conf_first: 'True'
+matching_gate: '1.0'
+matching_gate_px: '32.0'
+max_n: '-1'
+metrics: '[f1, precision, recall, accuracy, confusion, tp, fn, tn, fp, rmse, mae]'
+min_lr_ratio: '0.05'
+min_samples: '1'
+min_segments_for_polyline: '5'
+model: yolo_class
+momentum: '0.9'
+mpxw: '3.0'
+nms: 'False'
+noise_p: '0.1'
+noise_std: '0.01'
+nondeterministic: 'False'
+num_predictors: '4'
+nxw: '2.0'
+offset: 'True'
+optimizer: adam
+paths: <yolino.utils.paths.Paths object at 0x7efd8990a5f0>
+patience: '10'
+plot: 'False'
+resume_log: 'False'
+retrain: 'False'
+root: /home/work/caps_drone/yolino/CAPSTONE
+rotation_range: '0.01'
+run_name: exp21_tile_finetune_sample_from_exp19_ep41_e80
+scale: '32'
+scheduler: warmup_cosine
+scheduler_step_per_batch: 'True'
+show_params: 'False'
+skip_best_model_eval: 'True'
+split: train
+subsample_dataset_rhythm: '-1'
+tags: '[''my-exp-set'']'
+train_instance_embedding: 'False'
+training_variables: '[geom, confidence]'
+training_variables_all: '[geom, confidence]'
+use_bottom_up: 'True'
+use_conf_in_loss_matching: 'False'
+use_fpn: 'True'
+warmup_epochs: '3'
+weights: '[2.0, 1.0]'
+yolino: '{''commit'': ''9f2e3122d33686cbcc0e767e47fd12f77d561134'', ''short_commit'':
+  ''9f2e3122'', ''has_uncommitted'': True, ''branch'': ''my-exp-setup''}'

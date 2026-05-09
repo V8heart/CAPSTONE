@@ -41,6 +41,12 @@ from yolino.utils.logger import Log
 from yolino.utils.test_utils import test_setup, unsqueeze
 
 
+def _zero_embed_like_geom(geom_preds, args):
+    """LossComposition expects ``embed_preds`` shaped like geom but trailing ``embed_dim``."""
+    dim = int(getattr(args, "embed_dim", 8))
+    return torch.zeros(*geom_preds.shape[:-1], dim, dtype=geom_preds.dtype, device=geom_preds.device)
+
+
 class TestLoss(unittest.TestCase):
 
     def test_loss_composition(self):
@@ -101,10 +107,11 @@ class TestLoss(unittest.TestCase):
             print(dummy_labels.shape)
             if loss == LOSS.BINARY_CROSS_ENTROPY_SUM or loss == LOSS.BINARY_CROSS_ENTROPY_MEAN:
                 with self.assertRaises(NotImplementedError):
-                    loss_fct(preds=dummy_preds, grid_tensor=dummy_labels, filenames=["test.png"], epoch=0)
+                    loss_fct(dummy_preds, _zero_embed_like_geom(dummy_preds, args), dummy_labels,
+                             filenames=["test.png"], epoch=0)
                 continue
-            loss_vals, sum_loss, _ = loss_fct(preds=dummy_preds, grid_tensor=dummy_labels, filenames=["test.png"],
-                                              epoch=0)
+            loss_vals, sum_loss, _ = loss_fct(dummy_preds, _zero_embed_like_geom(dummy_preds, args), dummy_labels,
+                                              filenames=["test.png"], epoch=0)
             self.assertTrue(loss_vals[0] == 0,
                             msg="We applied %s to identical tensors, but received loss=%s" % (loss, loss_vals))
 
@@ -143,11 +150,12 @@ class TestLoss(unittest.TestCase):
             # Loss works with shapes preds=torch.Size([1, 243, 8, 4]) and gt=torch.Size([1, 243, 8, 10])
             if loss == LOSS.BINARY_CROSS_ENTROPY_MEAN or loss == LOSS.BINARY_CROSS_ENTROPY_SUM:
                 with self.assertRaises(NotImplementedError):
-                    loss_fct(preds=dummy_preds, grid_tensor=dummy_labels, filenames=["test.png"], epoch=0)
+                    loss_fct(dummy_preds, _zero_embed_like_geom(dummy_preds, args), dummy_labels,
+                             filenames=["test.png"], epoch=0)
                     continue
             else:
-                loss_vals, sum_loss, _ = loss_fct(preds=dummy_preds, grid_tensor=dummy_labels, filenames=["test.png"],
-                                                  epoch=0)
+                loss_vals, sum_loss, _ = loss_fct(dummy_preds, _zero_embed_like_geom(dummy_preds, args), dummy_labels,
+                                                  filenames=["test.png"], epoch=0)
 
             if loss == LOSS.CROSS_ENTROPY_SUM or loss == LOSS.CROSS_ENTROPY_MEAN or loss == LOSS.BINARY_CROSS_ENTROPY_MEAN or loss == LOSS.BINARY_CROSS_ENTROPY_SUM:
                 # TODO: calc true value
@@ -230,8 +238,8 @@ class TestLoss(unittest.TestCase):
             preds[:, :, :, pos] = set_value
             # preds = preds.permute((0, 3, 1, 2))
 
-            sum_losses, sum_loss, mean_losses = loss_fct(preds=preds, grid_tensor=grid_tensor, filenames=filenames,
-                                                         epoch=0)
+            sum_losses, sum_loss, mean_losses = loss_fct(preds, _zero_embed_like_geom(preds, args), grid_tensor,
+                                                         filenames=filenames, epoch=0)
             Log.debug("Losses: %s" % str(sum_losses))
 
             for i in range(len(sum_losses)):
@@ -273,7 +281,7 @@ class TestLoss(unittest.TestCase):
             forward = ForwardRunner(args, model, model_epoch)
 
             images, grid_tensors, filenames, _, _ = next(iter(loader))
-            outputs = forward(images, is_train=True, epoch=model_epoch)
+            geom_o, embed_o, _ = forward(images, is_train=True, epoch=model_epoch)
 
             # use 10x the label for duplicate check
             grid_tensors = torch.tile(grid_tensors[:, :, [0], :], [1, 1, args.num_predictors, 1])
@@ -287,7 +295,7 @@ class TestLoss(unittest.TestCase):
                                                                         is_exponential=[True, True])
             loss_fct = get_loss(losses=args.loss, args=args, coords=dataset.coords, weights=loss_weights,
                                 anchors=dataset.anchors, conf_weights=conf_loss_weights)
-            loss_fct(preds=outputs, grid_tensor=grid_tensors, filenames=filenames, epoch=0)
+            loss_fct(geom_o, embed_o, grid_tensors, filenames=filenames, epoch=0)
 
     def test_loss_association(self):
         for loss in LOSS:
@@ -306,7 +314,7 @@ class TestLoss(unittest.TestCase):
             forward = ForwardRunner(args, model, model_epoch)
 
             images, grid_tensors, filenames, _, _ = next(iter(loader))
-            outputs = forward(images, is_train=True, epoch=model_epoch)
+            geom_o, embed_o, _ = forward(images, is_train=True, epoch=model_epoch)
 
             loss_weights = TrainHandler.__init_loss_weights__(
                 num_train_vars=len(dataset.coords.train_vars()),
@@ -317,7 +325,7 @@ class TestLoss(unittest.TestCase):
                                                                         is_exponential=[True, True])
             loss_fct = get_loss(losses=args.loss, args=args, coords=dataset.coords, weights=loss_weights,
                                 anchors=dataset.anchors, conf_weights=conf_loss_weights)
-            loss_fct(outputs, grid_tensors, filenames=filenames, epoch=0)
+            loss_fct(geom_o, embed_o, grid_tensors, filenames=filenames, epoch=0)
 
     def test_matches_with_empty(self):
 
@@ -588,7 +596,8 @@ class TestLoss(unittest.TestCase):
                              args.num_predictors, trainer.dataset.coords.num_vars_to_train()))
 
         preds[0, 20, 0] = torch.tensor([0.4, 0.5, 0, 1, 1])
-        loss, sum_loss, _ = trainer.loss_fct(preds, grid_tensor, filenames=["test.png"], epoch=0)
+        loss, sum_loss, _ = trainer.loss_fct(preds, _zero_embed_like_geom(preds, trainer.args), grid_tensor,
+                                             filenames=["test.png"], epoch=0)
         self.assertEqual(torch.sum(torch.tensor(loss)), 0, loss)
 
     def test_prepate_data(self):

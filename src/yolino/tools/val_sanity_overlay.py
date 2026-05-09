@@ -33,7 +33,7 @@ def main():
     model = ForwardRunner(args=args, coords=dataset.coords, load_best=True)
 
     images, grid_tensor, fileinfo, *_ = next(iter(loader))
-    geom_preds, _ = model(images, is_train=False, epoch=None)
+    geom_preds, _, _ = model(images, is_train=False, epoch=None)
     pred_grid, _ = GridFactory.get(geom_preds[[0]], [], CoordinateSystem.CELL_SPLIT, args, input_coords=dataset.coords,
                                    only_train_vars=True, anchors=dataset.anchors)
     gt_grid, _ = GridFactory.get(grid_tensor[[0]], [], CoordinateSystem.CELL_SPLIT, args, input_coords=dataset.coords,

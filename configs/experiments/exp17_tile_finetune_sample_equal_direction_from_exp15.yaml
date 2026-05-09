@@ -1,0 +1,52 @@
+# exp17: exp15 baseline + EQUAL direction anchors (exp13 스타일)
+dataset: "ttpla"
+dataset_ttpla: "/home/work/caps_drone/yolino/Sample_YOLinO_tiled_1024"
+
+run_name: "exp17_tile_finetune_sample_equal_direction_e80"
+loggers: [ file, tb ]
+
+batch_size: 8
+epoch: 80
+img_height: 1024
+
+learning_rate: 0.00005
+lr_backbone: 0.00001
+lr_fpn: 0.00005
+lr_geom: 0.00005
+backbone_freeze_epochs: 0
+patience: 10
+
+scale: 32
+head_level: P4
+backbone: convnext
+use_fpn: true
+use_bottom_up: true
+backbone_pretrained: True
+
+linerep: md
+anchors: equal
+anchor_vars: direction
+offset: True
+num_predictors: 8
+
+training_variables: geom,confidence
+activations: linear,sigmoid
+loss: norm_mean,mse_mean
+loss_weight_strategy: fixed
+weights: "2,1"
+conf_match_weight: 1,10
+confidence: 0.5
+
+loss_hard_matching: true
+match_by_conf_first: true
+use_conf_in_loss_matching: false
+
+amp: false
+loading_workers: 2
+augment: crop,rotation,jitter,erasing,noise,normalize
+keep: "True"
+checkpoint_iteration: "1"
+eval_iteration: "1"
+
+skip_best_model_eval: true
+explicit_model: log/checkpoints/exp13_fpn_bottomup_p4_equal_direction_1024_e40/ep0039_model.pth

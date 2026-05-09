@@ -1,34 +1,34 @@
+# exp24: exp19 기반, timm HRNet-W32 backbone + stride32 P5 head.
 dataset: "ttpla"
-run_name: "exp08_convnext_focal_strict_hard_1024"
+dataset_ttpla: "/home/work/caps_drone/yolino/ttpla_yolino_dataset_1024_downsample"
+run_name: "exp24_timm_hrnet_w32_p5_1024"
+loggers: [ file, tb ]
 
 batch_size: 8
 epoch: 50
 img_height: 1024
 
 scale: 32
-head_level: P4
-backbone: convnext
-use_fpn: false
+head_level: P5
+backbone: timm
+timm_model_name: hrnet_w32
+timm_force_stride32_head: true
+use_fpn: true
+use_bottom_up: true
 backbone_pretrained: True
+
+num_predictors: 4
 
 training_variables: geom,confidence
 activations: linear,sigmoid
-loss: norm_mean,focal_mean
+loss: norm_mean,mse_mean
 loss_weight_strategy: fixed
 weights: "2,1"
 conf_match_weight: 1,10
 confidence: 0.5
 
-loggers: ["file", "tb"]
-metrics: [f1, precision, recall, accuracy, tp, fn, tn, fp]
-log_duplicate_metrics: false
-log_strict_metrics: false
-
-focal_gamma: 2.0
-focal_alpha: 0.5
-
 loss_hard_matching: true
-match_by_conf_first: false
+match_by_conf_first: true
 use_conf_in_loss_matching: false
 
 amp: false

@@ -237,18 +237,42 @@ class BinaryCrossEntropyCellLoss(AbstractLoss):
 
 
 class FocalConfidenceLoss(AbstractLoss):
-    """Binary focal loss on confidence probabilities (after sigmoid activation)."""
+    """Binary focal loss on confidence.
+
+    Preferred path (training): **raw geometry-head logits** + ``binary_cross_entropy_with_logits``
+    so gradients flow through a single sigmoid (RetinaNet-style). Fallback: probabilities +
+    ``logit(prob)`` chain when ``conf_logits_flat`` is absent (legacy / tests).
+    """
 
     def __init__(self, coords: VariableStructure, gpu, cuda, variable: Variables, conf_match_weight,
                  activation_is_exp, loss_weight_strategy, gamma=2.0, alpha=0.25):
-        class focal_loss_fct:
+        class focal_bce_logits:
             def __init__(self, gamma, alpha):
                 self.gamma = float(gamma)
                 self.alpha = float(alpha)
-                self.reduction = "mean"
+
+            def __call__(self, logits, gts):
+                gts = torch.clamp(gts.to(dtype=logits.dtype), min=0.0, max=1.0)
+                ce = F.binary_cross_entropy_with_logits(logits, gts, reduction="none")
+                pt = torch.exp(-ce)
+                alpha_t = torch.where(gts > 0.5,
+                                      torch.full_like(gts, self.alpha),
+                                      torch.full_like(gts, 1.0 - self.alpha))
+                focal = alpha_t * ((1 - pt) ** self.gamma) * ce
+                focal = torch.where(torch.isfinite(focal), focal, torch.zeros_like(focal))
+                return focal.mean()
+
+            def cuda(self):
+                return self
+
+        class focal_prob_via_inverse_logit:
+            """Legacy: probs → logit → BCEWithLogits (two sigmoids in autograd); avoid when logits available."""
+
+            def __init__(self, gamma, alpha):
+                self.gamma = float(gamma)
+                self.alpha = float(alpha)
 
             def __call__(self, preds, gts):
-                # preds are confidence probabilities (sigmoid already applied in model activations)
                 probs = torch.clamp(preds, min=1e-6, max=1 - 1e-6)
                 gts = torch.clamp(gts, min=0.0, max=1.0)
                 logits = torch.logit(probs)
@@ -264,14 +288,83 @@ class FocalConfidenceLoss(AbstractLoss):
             def cuda(self):
                 return self
 
+        self._focal_logits_fn = focal_bce_logits(gamma=gamma, alpha=alpha)
+        self._focal_prob_fn = focal_prob_via_inverse_logit(gamma=gamma, alpha=alpha)
+
         super().__init__(coords=coords, gpu=gpu, cuda=cuda, one_hot=True, variable=variable,
-                         function=focal_loss_fct(gamma=gamma, alpha=alpha),
+                         function=self._focal_logits_fn,
                          conf_match_weight=conf_match_weight, reduction="mean",
                          activation_is_exp=activation_is_exp, loss_weight_strategy=loss_weight_strategy)
 
-    def __call__(self, preds, grid_tensor, tag="none", epoch=None):
-        preds, grid_tensor, p_unmatched, gt_unmatched = super().__call__(preds, grid_tensor)
-        return self.__apply_function__(preds, grid_tensor, p_unmatched, gt_unmatched, tag=tag, epoch=epoch)
+    def _prepare_conf_logits_slices(self, logits_full: torch.Tensor, grid_tensor: torch.Tensor):
+        """Same masking / splits as AbstractLoss for CONF, but parallel logits tensor."""
+        device = grid_tensor.device
+        breaks_py = self.__get_breaks_in_coords__()
+        breaks_t = torch.tensor(breaks_py, device=device, dtype=torch.long)
+        breaks_train_py = self.__get_breaks_in_coords__(only_training=True)
+        breaks_train_t = torch.tensor(breaks_train_py, device=device, dtype=torch.long)
+
+        invalid_flags = torch.any(grid_tensor[:, self.coords.get_position_of_training_vars()].isnan(), dim=-1)
+        valid_flags = ~invalid_flags
+
+        logits_tm = logits_full[valid_flags]
+        logits_tum = logits_full[~valid_flags]
+        grid_tm = grid_tensor[valid_flags]
+        grid_tum = grid_tensor[~valid_flags]
+
+        grid_tum = self.replace_nans(grid_tum, variable=self.variable)
+
+        # tensor_split indices must live on CPU (PyTorch API); tensors may be CUDA.
+        br_cpu, br_train_cpu = breaks_t.cpu(), breaks_train_t.cpu()
+        _, labels_m, _ = torch.tensor_split(grid_tm, br_cpu, dim=1)
+        _, labels_um, _ = torch.tensor_split(grid_tum, br_cpu, dim=1)
+
+        _, logits_m, _ = torch.tensor_split(logits_tm, br_train_cpu, dim=1)
+        _, logits_um, _ = torch.tensor_split(logits_tum, br_train_cpu, dim=1)
+
+        logits_m, gt_m = self.__get_flat__(logits_m, labels_m)
+        logits_um, gt_um = self.__get_flat__(logits_um, labels_um)
+        return logits_m, gt_m, logits_um, gt_um
+
+    def __call__(self, preds, grid_tensor, tag="none", epoch=None, conf_logits_flat=None):
+        if conf_logits_flat is None:
+            self.function = self._focal_prob_fn
+            preds, grid_tensor, p_unmatched, gt_unmatched = super().__call__(preds, grid_tensor)
+            return self.__apply_function__(preds, grid_tensor, p_unmatched, gt_unmatched, tag=tag, epoch=epoch)
+
+        self.function = self._focal_logits_fn
+        logits_m, gt_m, logits_um, gt_um = self._prepare_conf_logits_slices(conf_logits_flat, grid_tensor)
+
+        matched_loss = torch.tensor(0.0, dtype=logits_m.dtype, device=logits_m.device)
+        if logits_m.numel() > 0 and not torch.all(gt_m.isnan()):
+            matched_loss = self.function(logits_m, gt_m)
+
+        unmatched_loss = torch.tensor(0.0, dtype=logits_um.dtype, device=logits_um.device)
+        if logits_um.numel() > 0 and not torch.all(gt_um.isnan()):
+            unmatched_loss = self.function(logits_um, gt_um)
+
+        normalizing_matched = len(logits_m) if self.reduction == "sum" else 1
+        normalizing_unmatched = len(logits_um) if self.reduction == "sum" else 1
+        mean_matched_loss = matched_loss / normalizing_matched
+        mean_unmatched_loss = unmatched_loss / normalizing_unmatched
+
+        Log.scalars(tag=tag, dict={"loss_conf_batch/match/mean": mean_matched_loss,
+                                   "loss_conf_batch/unmatch/mean": mean_unmatched_loss},
+                    epoch=epoch)
+
+        add_weights, weight_factors = get_actual_weight(epoch, "conf/match",
+                                                        weight_strategy=self.loss_weight_strategy,
+                                                        weight=self.conf_match_weight[0],
+                                                        activation_is_exponential=self.activation_is_exp)
+        weighted_loss = weight_factors * matched_loss + add_weights
+        add_weights, weight_factors = get_actual_weight(epoch, "conf/nomatch",
+                                                        weight_strategy=self.loss_weight_strategy,
+                                                        weight=self.conf_match_weight[1],
+                                                        activation_is_exponential=self.activation_is_exp)
+        weighted_loss += weight_factors * (self.conf_negative_weight * unmatched_loss) + add_weights
+        mean_loss = (mean_matched_loss + mean_unmatched_loss) * 0.5
+
+        return weighted_loss, mean_loss
 
 
 class MeanSquaredErrorLoss(AbstractLoss):
@@ -774,7 +867,7 @@ class LossComposition:
         if len(stats) > 0:
             Log.scalars(tag=tag, dict=stats, epoch=epoch)
 
-    def __call__(self, geom_preds, embed_preds, grid_tensor, filenames, epoch, tag="dummy_loss"):
+    def __call__(self, geom_preds, embed_preds, grid_tensor, filenames, epoch, tag="dummy_loss", geom_logits=None):
         if torch.any(torch.isnan(geom_preds)):
             raise ValueError("Prediction can not contain nans!")
         Log.debug("LossComposition input shapes geom=%s embed=%s gt=%s "
@@ -797,10 +890,18 @@ class LossComposition:
                                                                 filenames=filenames)
             geom_preds_flat = geom_preds_sorted.reshape(-1, self.coords.num_vars_to_train())
             embed_preds_flat = embed_preds.reshape(-1, embed_preds.shape[-1])
+            if geom_logits is not None:
+                geom_logits_flat = geom_logits.reshape(-1, self.coords.num_vars_to_train())
+            else:
+                geom_logits_flat = None
         else:
             reduced_grid_tensor = grid_tensor.reshape(-1, self.coords.get_length())
             geom_preds_flat = geom_preds.reshape(-1, self.coords.num_vars_to_train())
             embed_preds_flat = embed_preds.reshape(-1, embed_preds.shape[-1])
+            if geom_logits is not None:
+                geom_logits_flat = geom_logits.reshape(-1, self.coords.num_vars_to_train())
+            else:
+                geom_logits_flat = None
 
         self._log_confidence_distribution(geom_preds_flat=geom_preds_flat,
                                           reduced_grid_tensor=reduced_grid_tensor,
@@ -829,6 +930,9 @@ class LossComposition:
                     if t.variable == Variables.INSTANCE:
                         loss_val, mean_loss_val = t(embed_preds_flat, reduced_grid_tensor, tag=tag, epoch=epoch,
                                                     batch_size=batch_size, items_per_image=items_per_image)
+                    elif isinstance(t, FocalConfidenceLoss) and geom_logits_flat is not None:
+                        loss_val, mean_loss_val = t(geom_preds_flat, reduced_grid_tensor, tag=tag, epoch=epoch,
+                                                    conf_logits_flat=geom_logits_flat)
                     else:
                         loss_val, mean_loss_val = t(geom_preds_flat, reduced_grid_tensor, tag=tag, epoch=epoch)
                 except ValueError as e:

@@ -1,0 +1,10 @@
+run,best_step,f1,precision,recall,accuracy
+exp09_darknet_1024,28,0.676715,0.585231,0.807960,0.988808
+exp05_convnext_baseline_1024,36,0.748244,0.636636,0.911395,0.990870
+exp10_fpn_bottomup_p4_1024,29,0.784072,0.688579,0.915181,0.992449
+exp19_fpn_bottomup_p4_num_predictors4_1024,41,0.836319,0.782058,0.900903,0.989548
+exp15_tile_finetune_sample_e40,47,0.690160,0.616532,0.784137,0.982457
+exp16_tile_finetune_sample_aug_relaxed_e80,78,0.689261,0.605290,0.802378,0.982417
+exp17_tile_finetune_sample_equal_direction_e80,77,0.673364,0.561390,0.841502,0.982824
+exp18_tile_finetune_sample_matching_relaxed_e80,66,0.690660,0.606764,0.801830,0.982457
+exp21_tile_finetune_sample_from_exp19_ep41_e80,74,0.726186,0.713553,0.740392,0.979767

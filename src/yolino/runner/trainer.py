@@ -60,12 +60,12 @@ class TrainHandler:
             self.train_sampler = DistributedSampler(self.dataset, num_replicas=args.world_size,
                                                     rank=args.rank, shuffle=True, drop_last=True)
             self.val_sampler = DistributedSampler(self.val_dataset, num_replicas=args.world_size,
-                                                  rank=args.rank, shuffle=False, drop_last=True)
+                                                  rank=args.rank, shuffle=False, drop_last=False)
             self.loader = DataLoader(self.dataset, batch_size=args.batch_size, sampler=self.train_sampler,
                                      shuffle=False, drop_last=True, num_workers=args.loading_workers,
                                      pin_memory=args.gpu)
             self.val_loader = DataLoader(self.val_dataset, batch_size=args.batch_size, sampler=self.val_sampler,
-                                         shuffle=False, drop_last=True, num_workers=args.loading_workers,
+                                         shuffle=False, drop_last=False, num_workers=args.loading_workers,
                                          pin_memory=args.gpu)
         # Used by LR schedulers (especially warmup+cosine with step-wise updates).
         self.args.iters_per_epoch = len(self.loader)
@@ -257,7 +257,8 @@ class TrainHandler:
         # 1. 모델이 반환하는 2개의 텐서를 각각 받습니다.
         use_amp = bool(getattr(self.args, "amp", True) and self.args.gpu)
         with torch.cuda.amp.autocast(enabled=use_amp):
-            geom_preds, embed_preds = self.forward(images, is_train=is_train, epoch=epoch, first_run=first_run)
+            geom_preds, embed_preds, geom_logits = self.forward(images, is_train=is_train, epoch=epoch,
+                                                                   first_run=first_run)
 
         if image_idx_in_batch == 0 and epoch == 0:
             # 시각화/디버깅은 형태(Geometry) 정보만 필요하므로 geom_preds를 넘깁니다.
@@ -282,7 +283,8 @@ class TrainHandler:
             with torch.cuda.amp.autocast(enabled=use_amp):
                 losses, sum_loss, mean_losses = self.loss(
                     grid_tensor, geom_preds, embed_preds, epoch=epoch, filenames=filenames,
-                    tag=TRAIN_TAG if is_train else VAL_TAG)
+                    tag=TRAIN_TAG if is_train else VAL_TAG,
+                    geom_logits=geom_logits)
             self._log_loss_diagnostics(losses, mean_losses, sum_loss, filenames, epoch, image_idx_in_batch)
             if is_train:
                 self.backward(sum_loss, epoch=epoch)
@@ -479,6 +481,12 @@ class TrainHandler:
                 Log.error("Prediction is nan. Continue.")
                 return
 
+            # When eval_iteration==1, is_time_for_val is true every epoch; running full cell matching + metrics on
+            # every *training* batch made each step take minutes (rank 0 CPU-bound, other ranks wait on DDP sync).
+            # Metrics for monitoring are still computed in the validation loop (is_train=False) below.
+            if is_train:
+                return
+
             if self.args.full_eval:
                 try:
                     preds_uv, gt_uv = self.evaluator.prepare_uv(preds=preds, grid_tensors=grid_tensor,
@@ -581,8 +589,12 @@ class TrainHandler:
         return converged
 
     def on_training_finished(self, epoch, do_nms):
+        skip_best = bool(getattr(self.args, "skip_best_model_eval", False))
         best_model_exists = bool(getattr(self.args, "keep", False)) and os.path.exists(str(self.args.paths.best_model))
-        if best_model_exists:
+        if skip_best:
+            Log.info("Skipping best-model end-of-training eval (--skip_best_model_eval): "
+                     "that pass uses the full train loader twice per batch, not val_loader.")
+        elif best_model_exists:
             Log.print('**** Best Model Eval %s ****' % (self.args.id))
             best_evaluator = Evaluator(args=self.evaluator.args, anchors=self.evaluator.anchors,
                                        coords=self.evaluator.coords, load_best_model=True)
@@ -623,16 +635,17 @@ class TrainHandler:
         Log.debug('Finished Training')
         Log.finish()
 
-    def loss(self, grid_tensor, geom_preds, embed_preds, filenames, epoch, tag="dummy_trainer"):
+    def loss(self, grid_tensor, geom_preds, embed_preds, filenames, epoch, tag="dummy_trainer", geom_logits=None):
         """
         Args:
             grid_tensor (torch.tensor): [batch, cells, preds, vars]
             geom_preds (torch.tensor): [batch, cells, preds, num_train_vars]
             embed_preds (torch.tensor): [batch, cells, preds, embed_dim]
+            geom_logits (torch.tensor, optional): pre-sigmoid geometry head; same layout as geom_preds (for focal CE).
         """
-        # 앞서 수정한 LossComposition의 __call__ 파라미터에 맞게 3개를 전달합니다.
-        losses, sum_loss, mean_losses = self.loss_fct(geom_preds, embed_preds, grid_tensor, filenames=filenames, epoch=epoch,
-                                                      tag=tag)
+        losses, sum_loss, mean_losses = self.loss_fct(
+            geom_preds, embed_preds, grid_tensor, filenames=filenames, epoch=epoch,
+            tag=tag, geom_logits=geom_logits)
         if torch.isnan(sum_loss) or torch.isinf(sum_loss):
             raise ValueError("Loss ran into NaN or infinity")
 
@@ -699,28 +712,48 @@ class TrainHandler:
         Log.error(msg)
 
     def _log_gradient_norms(self, epoch):
-        grad_norms = {}
+        # Each .item() forces a GPU sync. The old loop synced once per parameter with a grad (~hundreds per batch),
+        # on every DDP rank — destroying step time. Only rank 0 logs; only match params we actually report.
+        if not getattr(self.args, "is_main_process", True):
+            return
+        patterns = (
+            ("embed_head", "embed_head"),
+            ("attention", "attention"),
+            ("cbam", "cbam"),
+            ("yolo", "yolo_head"),
+        )
+        buckets = {key: [] for _, key in patterns}
         for name, param in self.model.named_parameters():
-            if param.grad is not None:
-                norm = param.grad.data.norm(2).item()
-                if "embed_head" in name:
-                    grad_norms.setdefault("embed_head", []).append(norm)
-                elif "attention" in name:
-                    grad_norms.setdefault("attention", []).append(norm)
-                elif "cbam" in name:
-                    grad_norms.setdefault("cbam", []).append(norm)
-                elif "yolo" in name:
-                    grad_norms.setdefault("yolo_head", []).append(norm)
-
-        for group, norms in grad_norms.items():
-            avg_norm = sum(norms) / len(norms) if norms else 0.0
-            max_norm = max(norms) if norms else 0.0
+            if param.grad is None:
+                continue
+            for substr, key in patterns:
+                if substr in name:
+                    buckets[key].append(param.grad.detach().norm(2).item())
+                    break
+        for group, norms in buckets.items():
+            if not norms:
+                continue
+            avg_norm = sum(norms) / len(norms)
+            max_norm = max(norms)
             Log.scalars(tag=TRAIN_TAG, epoch=epoch,
                         dict={f"grad_norm/{group}/avg": avg_norm,
                               f"grad_norm/{group}/max": max_norm})
 
     def is_time_for_val(self, epoch):
         return epoch % self.args.eval_iteration == 0
+
+    def _denormalize_for_viz(self, image):
+        """Return an image suitable for visualization without changing training tensors."""
+        if not isinstance(image, torch.Tensor):
+            return image
+        if image.ndim != 3 or image.shape[0] > 3:
+            return image
+        augmentor = getattr(self.dataset, "augmentor", None)
+        if augmentor is None:
+            return image
+        mean = torch.tensor(augmentor.norm_mean, dtype=image.dtype, device=image.device).view(3, 1, 1)
+        std = torch.tensor(augmentor.norm_std, dtype=image.dtype, device=image.device).view(3, 1, 1)
+        return torch.clamp(image * std + mean, 0.0, 1.0)
 
     def plot_debug_class_image(self, full_basename, image, grid, epoch, tag="unknown", imageidx=ImageIdx.DEFAULT,
                                ignore_classes=[]):
@@ -735,8 +768,9 @@ class TrainHandler:
                           show_grid=True, imageidx: ImageIdx = ImageIdx.LABEL,
                           coordinates=CoordinateSystem.UV_CONTINUOUS, gt=None, training_vars_only=False, suffix="",
                           cell_size=None):
+        viz_image = self._denormalize_for_viz(image)
         img_path = self.args.paths.generate_debug_image_file_path(full_basename, imageidx, suffix=suffix + "_" + tag)
-        ok = plot_style_grid(uv_lines, img_path, image, coords=self.dataset.coords,
+        ok = plot_style_grid(uv_lines, img_path, viz_image, coords=self.dataset.coords,
                              cell_size=self.args.cell_size if cell_size is None else cell_size,
                              show_grid=show_grid, coordinates=coordinates, epoch=epoch, tag=tag,
                              imageidx=imageidx, threshold=self.args.confidence, gt=gt,

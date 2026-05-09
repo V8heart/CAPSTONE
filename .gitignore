@@ -193,10 +193,19 @@ weights/
 *.onnx
 
 # TensorBoard / run artifacts (very large; do not commit)
+runs/
 ttpla_train_exp/runs/
 
 # Per-epoch / run checkpoints (paths under experiment log root)
 ttpla_train_exp/**/checkpoints/
+
+# Local viz / exports — rasters only (.yaml .csv etc. still tracked)
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.bmp
 
 # Optional local clutter (uncomment if needed)
 # ttpla_train_exp/debug_id_assignment_report.json

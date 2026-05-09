@@ -65,8 +65,8 @@ class ForwardRunner:
                 [batch, 3, height, width]
 
         Returns:
-            torch.tensor:
-                with shape [batch, cells, preds, vars]
+            tuple: ``(geom_act, embed_act, geom_logits)`` — activated geometry preds, embedding preds (or None),
+            and pre-activation geometry logits (for focal / BCE-with-logits on confidence).
         """
         if self.args.cuda not in str(images.device):
             Log.debug("Moved images from %s to %s" % (images.device, self.args.cuda))
@@ -75,15 +75,25 @@ class ForwardRunner:
         inference_start = timeit.default_timer()
         self.model = self.model.train(is_train)
         if is_train:
-            logits = self.model(images)  # [batch, cells, preds, vars]
-            outputs = self.activations(logits)  # [batch, cells, preds, vars]
+            logits = self.model(images)
+            outputs = self.activations(logits)
         else:
             with torch.no_grad():
-                logits = self.model(images)  # [batch, cells, preds, vars]
-                outputs = self.activations(logits)  # [batch, cells, preds, vars]
+                logits = self.model(images)
+                outputs = self.activations(logits)
 
         Log.time(key="raw_infer", value=timeit.default_timer() - inference_start, epoch=epoch)
 
         if first_run:
             Log.graph(self.model, images)
-        return outputs  # [batch, cells, preds, vars]
+
+        # Pre-activation geometry head logits (for focal BCE on logits). Embedding branch unchanged.
+        if isinstance(logits, tuple):
+            geom_logits = logits[0]
+        else:
+            geom_logits = logits
+        if isinstance(outputs, tuple):
+            geom_act, embed_act = outputs
+        else:
+            geom_act, embed_act = outputs, None
+        return geom_act, embed_act, geom_logits
