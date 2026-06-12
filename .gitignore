@@ -144,7 +144,6 @@ cython_debug/
 # End of https://www.toptal.com/developers/gitignore/api/python
 # --------- 
 
-# tb_logs / runs: not ignored — may be large; exclude via .git/info/exclude locally if needed.
 src/yolino/models/cfg/darknet-cfg
 MNIST
 res/yolov3.weights
@@ -209,3 +208,42 @@ ttpla_train_exp/**/checkpoints/
 
 # Optional local clutter (uncomment if needed)
 # ttpla_train_exp/debug_id_assignment_report.json
+
+# ---- Experiment runtime outputs (TensorBoard, cmd logs, eval artifacts) ----
+
+# TensorBoard (supplement runs/ above)
+tb_logs/
+**/tb_logs/
+events.out.tfevents.*
+
+# Process / shell logs (not src/yolino code)
+logs/
+cmd_logs/
+ttpla_train_exp/cmd_logs/
+*.pid
+*.log.prev
+*.log.prev2
+
+# Offline eval / audit outputs (NOT src/yolino/eval/ source code)
+ttpla_train_exp/eval/
+frag_audit_*.json
+
+# Latest-run param snapshots (runtime; stop tracking existing copies)
+log/latest_params.yaml
+log/latest_interesting_params.yaml
+ttpla_train_exp/log/latest_params.yaml
+ttpla_train_exp/log/latest_interesting_params.yaml
+
+# One-off viz / comparison scripts (safety net; selective git add is primary)
+src/yolino/tools/visualize_*
+src/yolino/tools/compare_*
+src/yolino/tools/comparison_*
+src/yolino/tools/benchmark_*
+src/yolino/tools/*_viz.py
+src/yolino/tools/val_*_overlay.py
+src/yolino/tools/val_raw_*
+src/yolino/tools/*_triptych*
+src/yolino/tools/*_paired.py
+scripts/run_comparison_*
+scripts/viz_*
+scripts/analyze_*

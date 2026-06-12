@@ -341,34 +341,43 @@ class Log():
     @classmethod
     def scalars(self, tag, dict, epoch, level=1):
         new_dict = {}
+        tb_items = {}
         for k, v in dict.items():
+            entries = []
             # 1. 값이 넘파이 배열이나 리스트인 경우 (기존 로직 유지)
             if type(v) == np.ndarray or type(v) == list:
                 if len(v) == 1:
-                    new_dict[str(k) + "/" + tag] = v[0]
+                    entries = [(str(k), v[0])]
                 else:
                     Log.info("Miss to push %s: %s" % (k, v))
                     continue
             # 2. [추가] 값이 딕셔너리인 경우 (Flatten 평탄화 처리)
             elif type(v).__name__ == 'dict':
                 for sub_k, sub_v in v.items():
-                    new_dict[str(k) + "_" + str(sub_k) + "/" + tag] = sub_v
+                    entries.append((str(k) + "_" + str(sub_k), sub_v))
             # 3. torch 텐서: 그래프/디바이스에 붙은 채 TB에 넘기면 참조가 남거나 메모리가 불안정해질 수 있음 → 스칼라만 기록
             elif isinstance(v, torch.Tensor):
                 if v.numel() == 1:
-                    new_dict[str(k) + "/" + tag] = v.detach().float().cpu().item()
+                    entries = [(str(k), v.detach().float().cpu().item())]
                 else:
                     Log.info("Miss to push %s: non-scalar tensor shape=%s" % (k, tuple(v.shape)))
+                    continue
             # 4. 단순 숫자 등
             else:
-                new_dict[str(k) + "/" + tag] = v
+                entries = [(str(k), v)]
+
+            for mk, val in entries:
+                new_dict[str(mk) + "/" + tag] = val
+                tb_items[str(mk)] = val
 
         if len(new_dict) == 0:
             Log.info("No scalar to report for %s epoch %s. Input was %s" % (tag, epoch, dict), level=level)
             return
 
         if Logger.TENSORBOARD in Log.__loggers__:
-            Log.__tb__.add_scalars(tag, new_dict, epoch)
+            for mk, val in tb_items.items():
+                tb_name = ("%s/%s" % (tag, mk)) if tag else str(mk)
+                Log.__tb__.add_scalar(tb_name, val, epoch)
 
         if Logger.CLEARML in Log.__loggers__:
             for k, v in new_dict.items():

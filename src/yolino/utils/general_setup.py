@@ -131,10 +131,12 @@ def validate_args(args):
 def __set_imgsize__(args):
     max_size = DatasetFactory.get_max_image_size(dataset=args.dataset)
     if args.img_height is not None:
-        Log.error(
-            f"{args.dataset} has --img_size {max_size}. You chose --img_height {args.img_height}. Do not change the image size if not necessary!")
-        Log.tag("wrong_img")
         args.img_size = DatasetFactory.get_img_size(dataset=args.dataset, img_height=args.img_height)
+        if tuple(args.img_size) != tuple(max_size):
+            Log.error(
+                f"{args.dataset} has --img_size {max_size}. You chose --img_height {args.img_height}, "
+                f"which yields {args.img_size}. Do not change the image size if not necessary!")
+            Log.tag("wrong_img")
     else:
         args.img_size = max_size
 

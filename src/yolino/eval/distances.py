@@ -537,3 +537,54 @@ def get_max_value(distance_metric, max_distance, coords: VariableStructure, use_
         return point_squared_distance(tensor_gt, tensor_pred, coords=coords, use_conf=use_conf).item()
     else:
         raise NotImplementedError("No implementation for %s" % distance_metric)
+
+
+def _endpoints_from_geom(geom: torch.Tensor, linerep: LINE, eps: float = 1e-6) -> tuple:
+    """Return segment endpoints (p1, p2) from a [N, 4] geometry tensor."""
+    if linerep in (LINE.MID_DIR, LINE.MID_LEN_DIR):
+        half = geom[:, 2:4] * 0.5
+        p1 = geom[:, :2] - half
+        p2 = geom[:, :2] + half
+    elif linerep == LINE.POINTS:
+        p1 = geom[:, :2]
+        p2 = geom[:, 2:4]
+    else:
+        raise NotImplementedError("line_segment_iou for linerep %s" % linerep)
+    return p1, p2
+
+
+def line_segment_iou(
+    pred_geom: torch.Tensor,
+    gt_geom: torch.Tensor,
+    linerep: LINE,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Differentiable line-segment IoU via 1D overlap on the GT axis.
+
+    Args:
+        pred_geom: [N, 4] predicted geometry (cell-local).
+        gt_geom: [N, 4] ground-truth geometry (cell-local).
+
+    Returns:
+        [N] IoU in [0, 1].
+    """
+    pred_p1, pred_p2 = _endpoints_from_geom(pred_geom, linerep, eps=eps)
+    gt_p1, gt_p2 = _endpoints_from_geom(gt_geom, linerep, eps=eps)
+
+    gt_vec = gt_p2 - gt_p1
+    gt_len = gt_vec.norm(dim=-1, keepdim=True).clamp(min=eps)
+    gt_dir = gt_vec / gt_len
+
+    def _proj(p):
+        return ((p - gt_p1) * gt_dir).sum(dim=-1)
+
+    gt_min = torch.zeros(gt_geom.shape[0], device=gt_geom.device, dtype=gt_geom.dtype)
+    gt_max = gt_len.squeeze(-1)
+    pred_t1 = _proj(pred_p1)
+    pred_t2 = _proj(pred_p2)
+    pred_min = torch.minimum(pred_t1, pred_t2)
+    pred_max = torch.maximum(pred_t1, pred_t2)
+
+    inter = (torch.minimum(gt_max, pred_max) - torch.maximum(gt_min, pred_min)).clamp(min=0.0)
+    union = (gt_max - gt_min) + (pred_max - pred_min) - inter
+    return (inter / union.clamp(min=eps)).clamp(0.0, 1.0)

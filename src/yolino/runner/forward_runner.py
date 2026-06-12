@@ -52,35 +52,68 @@ class ForwardRunner:
         else:
             self.model, _, self.start_epoch = load_checkpoint(args, coords, allow_failure=False, load_best=load_best)
 
-        if self.args.cuda not in str(next(self.model.parameters()).device):
-            self.model = self.model.to(self.args.cuda)
+        _tgt = torch.device(self.args.cuda)
+        _p_dev = next(self.model.parameters()).device
+        if _p_dev != _tgt:
+            self.model = self.model.to(_tgt)
 
         self.activations = get_activations(self.args.activations, coords, self.args.linerep)
 
-    def __call__(self, images, is_train, epoch, first_run=False):
+    def __call__(self, images, is_train, epoch, first_run=False, e2e_gt_pack=None):
         """
 
         Args:
             images (torch.tensor):
                 [batch, 3, height, width]
+            e2e_gt_pack: optional GT polyline pack (TTPLA collate). Required only by
+                heads that need GT at forward time — e.g. ``--e2e_mode=hough_detr``
+                with denoising training enabled (``e2e_hough_dn_mode != "none"``).
+                Pass ``None`` for inference / heads that don't consume GT.
 
         Returns:
-            tuple: ``(geom_act, embed_act, geom_logits)`` — activated geometry preds, embedding preds (or None),
-            and pre-activation geometry logits (for focal / BCE-with-logits on confidence).
+            tuple: ``(geom_act, embed_act, geom_logits, e2e_out)`` — activated geometry, embedding preds,
+            pre-activation geometry logits, and optional E2E head dict (or None).
         """
-        if self.args.cuda not in str(images.device):
-            Log.debug("Moved images from %s to %s" % (images.device, self.args.cuda))
-            images = images.to(self.args.cuda)
+        # Do not compare with substring checks: e.g. args.cuda=="cuda" is contained in str(cuda:0).
+        tgt = next(self.model.parameters()).device
+        if images.device != tgt:
+            Log.debug("Moved images from %s to %s" % (images.device, tgt))
+            images = images.to(tgt)
 
         inference_start = timeit.default_timer()
-        self.model = self.model.train(is_train)
+        self.model.train(is_train)
+        # Only heads that consume GT inside forward (hough_detr DN) need this stash.
+        # The model reads + clears it at the end of forward so it never leaks across
+        # backward boundaries.
+        net = self.model.module if hasattr(self.model, "module") else self.model
+        if e2e_gt_pack is not None and getattr(net, "e2e_head", None) is not None:
+            net._pending_e2e_gt_pack = e2e_gt_pack
+        # Heads that gate behavior on the current training epoch (e.g.
+        # ``learnable_detr`` with ``--e2e_dn_off_epoch``) read this transient
+        # stash; cleared by the model at the end of forward to avoid leakage.
+        if getattr(net, "e2e_head", None) is not None:
+            net._pending_e2e_epoch = epoch
         if is_train:
             logits = self.model(images)
-            outputs = self.activations(logits)
         else:
             with torch.no_grad():
-                logits = self.model(images)
-                outputs = self.activations(logits)
+                logits = net(images)
+
+        e2e_pack = None
+        e2e_out = None
+        if isinstance(logits, tuple) and len(logits) == 3:
+            geom_logits, embed_logits, third = logits
+            logits_for_act = (geom_logits, embed_logits)
+            # Legacy: pack with head_feat for run_e2e_post outside forward (breaks DDP).
+            # Current YolinoNet returns the E2E head dict from forward (keys include bezier_curve_px).
+            if isinstance(third, dict) and "head_feat" in third:
+                e2e_pack = third
+            else:
+                e2e_out = third
+        else:
+            logits_for_act = logits
+
+        outputs = self.activations(logits_for_act)
 
         Log.time(key="raw_infer", value=timeit.default_timer() - inference_start, epoch=epoch)
 
@@ -96,4 +129,10 @@ class ForwardRunner:
             geom_act, embed_act = outputs
         else:
             geom_act, embed_act = outputs, None
-        return geom_act, embed_act, geom_logits
+
+        if e2e_pack is not None:
+            net = self.model.module if hasattr(self.model, "module") else self.model
+            runner = getattr(net, "run_e2e_post", None)
+            if runner is not None:
+                e2e_out = runner(geom_act, e2e_pack)
+        return geom_act, embed_act, geom_logits, e2e_out

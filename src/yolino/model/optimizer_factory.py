@@ -55,13 +55,18 @@ _FPN_PREFIXES = (                                 # FPN lateral + smooth convs +
     "backbone.bottom_up.",
     "module.backbone.bottom_up.",
 )
-_GEOM_HEAD_PREFIXES = ("yolo.", "module.yolo.")
-_EMBED_HEAD_PREFIXES = ("embed_head.", "module.embed_head.")
+_GEOM_HEAD_PREFIXES = ("yolo.", "module.yolo.", "std_head.geom_dcns.", "module.std_head.geom_dcns.")
+_EMBED_HEAD_PREFIXES = (
+    "embed_head.", "module.embed_head.",
+    "std_head.embed_convs.", "module.std_head.embed_convs.",
+)
+_E2E_HEAD_PREFIXES = ("e2e_head.", "module.e2e_head.")
+_STD_FEAT_DCN_PREFIXES = ("std_feat_dcn.", "module.std_feat_dcn.")
 _REFINE_PREFIXES = ("attention.", "cbam.", "module.attention.", "module.cbam.")  # GlobalSelfAttention / CBAM
 
 
 def _classify(name: str, refine_shared: bool) -> str:
-    """Map a parameter name to one of: 'backbone', 'fpn', 'geom', 'embed'."""
+    """Map a parameter name to one of: 'backbone', 'fpn', 'geom', 'embed', 'e2e'."""
     if any(name.startswith(p) for p in _BACKBONE_BODY_PREFIXES):
         return "backbone"
     for p in _FPN_PREFIXES:
@@ -69,6 +74,10 @@ def _classify(name: str, refine_shared: bool) -> str:
             return "fpn"
     if any(name.startswith(p) for p in _GEOM_HEAD_PREFIXES):
         return "geom"
+    if any(name.startswith(p) for p in _E2E_HEAD_PREFIXES):
+        return "e2e"
+    if any(name.startswith(p) for p in _STD_FEAT_DCN_PREFIXES):
+        return "e2e"
     if any(name.startswith(p) for p in _EMBED_HEAD_PREFIXES):
         return "embed"
     if any(name.startswith(p) for p in _REFINE_PREFIXES):
@@ -85,9 +94,10 @@ def _collect_lr_groups(args, net, loss_weights):
     lr_fpn = getattr(args, "lr_fpn", None)
     lr_geom = getattr(args, "lr_geom", None)
     lr_embed = getattr(args, "lr_embed", None)
+    lr_e2e = getattr(args, "lr_e2e", None)
 
     # Backward-compatible path: if NONE of the per-group LRs is set, use a single flat LR.
-    if all(x is None for x in (lr_backbone, lr_fpn, lr_geom, lr_embed)):
+    if all(x is None for x in (lr_backbone, lr_fpn, lr_geom, lr_embed, lr_e2e)):
         flat = [p for p in net.parameters() if p.requires_grad] \
                + [l for l in loss_weights if l.requires_grad]
         return flat, {"mode": "flat", "lr": lr_global}
@@ -100,10 +110,12 @@ def _collect_lr_groups(args, net, loss_weights):
         lr_geom = lr_global
     if lr_embed is None:
         lr_embed = lr_global
+    if lr_e2e is None:
+        lr_e2e = lr_embed
 
     refine_shared = getattr(args, "feature_refine", "sa_embed_only") in ("sa_shared", "cbam_shared")
 
-    buckets = {"backbone": [], "fpn": [], "geom": [], "embed": []}
+    buckets = {"backbone": [], "fpn": [], "geom": [], "embed": [], "e2e": []}
     for name, p in net.named_parameters():
         if not p.requires_grad:
             continue
@@ -119,6 +131,8 @@ def _collect_lr_groups(args, net, loss_weights):
         groups.append({"params": buckets["geom"], "lr": lr_geom, "name": "geom"})
     if buckets["embed"]:
         groups.append({"params": buckets["embed"], "lr": lr_embed, "name": "embed"})
+    if buckets["e2e"]:
+        groups.append({"params": buckets["e2e"], "lr": lr_e2e, "name": "e2e"})
 
     learnable_loss_weights = [l for l in loss_weights if l.requires_grad]
     if learnable_loss_weights:
@@ -127,16 +141,17 @@ def _collect_lr_groups(args, net, loss_weights):
     summary = {
         "mode": "grouped",
         "lr_backbone": lr_backbone, "lr_fpn": lr_fpn,
-        "lr_geom": lr_geom, "lr_embed": lr_embed,
+        "lr_geom": lr_geom, "lr_embed": lr_embed, "lr_e2e": lr_e2e,
         "n_backbone": len(buckets["backbone"]), "n_fpn": len(buckets["fpn"]),
         "n_geom": len(buckets["geom"]), "n_embed": len(buckets["embed"]),
+        "n_e2e": len(buckets["e2e"]),
         "n_loss_weights": len(learnable_loss_weights),
     }
-    Log.info("Param-group LR: backbone=%.2e fpn=%.2e geom=%.2e embed=%.2e "
-             "(loss_weights LR=%.2e)" % (lr_backbone, lr_fpn, lr_geom, lr_embed, lr_global))
-    Log.debug("Param-group sizes: backbone=%d fpn=%d geom=%d embed=%d loss_weights=%d"
+    Log.info("Param-group LR: backbone=%.2e fpn=%.2e geom=%.2e embed=%.2e e2e=%.2e "
+             "(loss_weights LR=%.2e)" % (lr_backbone, lr_fpn, lr_geom, lr_embed, lr_e2e, lr_global))
+    Log.debug("Param-group sizes: backbone=%d fpn=%d geom=%d embed=%d e2e=%d loss_weights=%d"
               % (summary["n_backbone"], summary["n_fpn"],
-                 summary["n_geom"], summary["n_embed"], summary["n_loss_weights"]))
+                 summary["n_geom"], summary["n_embed"], summary["n_e2e"], summary["n_loss_weights"]))
     return groups, summary
 
 

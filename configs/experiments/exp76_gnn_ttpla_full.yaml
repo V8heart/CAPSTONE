@@ -1,0 +1,128 @@
+# exp76: TTPLA full 1024×1024 — GNN head only (exp65 settings).
+# Init: exp19 ep42 geom frozen; train GNN on full ttpla_yolino_dataset_1024x1024.
+dataset: "ttpla"
+dataset_ttpla: "/home/work/caps_drone/yolino/ttpla_yolino_dataset_1024x1024"
+run_name: "exp76_gnn_ttpla_full"
+loggers: [ file, tb ]
+
+batch_size: 8
+epoch: 142
+img_height: 1024
+
+scale: 32
+head_level: P4
+backbone: convnext
+use_fpn: true
+use_bottom_up: true
+backbone_pretrained: true
+
+num_predictors: 4
+
+training_variables: geom,confidence
+activations: linear,sigmoid
+loss: norm_mean,mse_mean
+loss_weight_strategy: fixed
+weights: "2,1"
+conf_match_weight: 1,10
+confidence: 0.7
+
+loss_hard_matching: true
+match_by_conf_first: true
+use_conf_in_loss_matching: false
+
+learning_rate: 0.0001
+lr_backbone: 0.0
+lr_fpn: 0.0
+lr_geom: 0.0
+lr_e2e: 0.0001
+backbone_freeze_epochs: 10
+optimizer: adam
+decay_rate: 0.0
+scheduler: warmup_cosine
+warmup_epochs: 0
+min_lr_ratio: 0.1
+scheduler_step_per_batch: true
+grad_clip_norm: 1.0
+best_mean_loss: true
+
+patience: 25
+earliest_stop: 120
+
+amp: false
+ddp_find_unused_parameters: true
+log_cuda_mem_after_epoch: true
+loading_workers: 0
+augment: crop,rotation,jitter,erasing,noise,normalize
+keep: "True"
+checkpoint_iteration: "1"
+eval_iteration: "1"
+
+explicit_model: "log/checkpoints/exp19_fpn_bottomup_p4_num_predictors4_1024/ep0042_model.pth"
+
+skip_best_model_eval: true
+
+e2e_differentiable_postproc: true
+e2e_mode: gnn
+e2e_train_with_gt_polylines: false
+
+e2e_token_dim: 256
+
+gnn_max_nodes: 384
+gnn_node_conf_thresh: 0.1
+gnn_soft_nms: false
+
+gnn_adjacency_mode: directional2
+gnn_use_hard_geom_gate: true
+gnn_soft_geom_gate: false
+
+gnn_max_lateral_px: 5.0
+gnn_max_lateral_sym: true
+gnn_max_along_px: 128.0
+gnn_max_end_gap_px: 40.0
+gnn_min_dir_dot: 0.96
+gnn_edge_radius_px: 0.0
+gnn_knn_k: 16
+gnn_directional_min_sep_px: 8.0
+gnn_directional_k: 8
+
+gnn_gat_layers: 3
+gnn_heads: 4
+gnn_dropout: 0.1
+
+gnn_node_use_visual_feat: false
+gnn_use_matched_gt_from_geom: true
+gnn_supervise_matched_nodes_only: true
+
+gnn_edge_supervision: polyline_adjacent
+gnn_polyline_adjacent_end_px: 12.0
+
+gnn_loss_weight: 0.05
+gnn_warmup_epochs: 1
+gnn_warmup_start_epoch: 0
+gnn_edge_loss_type: bce
+gnn_pos_weight: 2.0
+gnn_neg_per_pos: 8
+gnn_neg_min_kept: 2
+gnn_node_assign_radius_px: 24.0
+
+gnn_use_strict_next_hop: false
+gnn_next_hop_allow_closed: false
+gnn_degree_loss_weight: 0.1
+gnn_degree_row_cap: 2.0
+gnn_degree_col_cap: 2.0
+gnn_rw_topology_weight: 0.1
+gnn_rw_start_epoch: 3
+gnn_rw_steps: 6
+gnn_rw_pos_weight: 20.0
+gnn_chamfer_weight: 0.0
+gnn_cc_edge_thresh: 0.3
+
+gnn_assembly_max_nodes_per_inst: 32
+gnn_assembly_max_instances: 8
+gnn_assembly_tier: none
+
+gnn_overlay_edge_thresh: 0.35
+gnn_eval_edge_threshs: "0.35,0.5"
+
+e2e_gt_max_instances: 64
+e2e_gt_max_points: 256

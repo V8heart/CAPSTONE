@@ -523,7 +523,7 @@ class Grid:
                     if predictor.confidence < confidence_threshold:
                         continue
 
-                    val = np.empty((length), dtype=float)
+                    val = np.full((length), np.nan, dtype=float)
 
                     if coords[Variables.GEOMETRY] > 0:
                         if round_to_int:
@@ -555,6 +555,18 @@ class Grid:
                             val[coords.get_position_within_prediction(Variables.CONF)] = predictor.confidence
                         elif not is_training_data:
                             val[coords.get_position_of(Variables.CONF)] = predictor.confidence
+
+                    if coords[Variables.INSTANCE] > 0:
+                        if is_training_data and Variables.INSTANCE in coords.train_vars():
+                            inst_pos = coords.get_position_within_prediction(Variables.INSTANCE)
+                        elif not is_training_data:
+                            inst_pos = coords.get_position_of(Variables.INSTANCE)
+                        else:
+                            inst_pos = []
+                        if len(inst_pos) > 0:
+                            val[inst_pos] = 0.0
+                            if predictor.id is not None and predictor.id >= 0:
+                                val[inst_pos[0]] = float(predictor.id)
 
                     array = np.vstack([array, val])
 
