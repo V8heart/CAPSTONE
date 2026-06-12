@@ -93,7 +93,7 @@ class Evaluator:
     def __call__(self, images, grid_tensor, idx, filenames, epoch, num_duplicates, tag="dummy_eval", do_in_uv=True,
                  apply_nms=False, fit_line=False):
 
-        geom_preds, embed_preds, _ = self.forward(images, epoch=epoch, is_train=False)
+        geom_preds, embed_preds, _, _ = self.forward(images, epoch=epoch, is_train=False)
         geom_preds = geom_preds.detach()
         embed_preds = embed_preds.detach()
         Log.debug("Evaluator forward output shapes geom=%s embed=%s" % (tuple(geom_preds.shape), tuple(embed_preds.shape)))
@@ -498,7 +498,7 @@ class Evaluator:
                          self.args.paths.generate_eval_image_file_path("<file>", idx=ImageIdx.PRED)))
 
 
-        if len(scores) == 0:
+        if len(scores) == 0 and tag != "train":
             Log.warning("We did not calculate any scores successfully.")
 
         Log.scalars(tag=tag, dict=scores, epoch=epoch)

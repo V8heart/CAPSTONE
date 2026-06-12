@@ -394,8 +394,14 @@ class RandomCropWithLabels(torch.nn.Module):
             Log.debug("RandomCrop: %d polylines have been erased from the labels with target size %dx%d at (%d, %d)"
                       % (removals, th, tw, i, j))
 
-        params.update({"crop_l": j, "crop_r": int(image.shape[2] - (tw + j)),
-                       "crop_b": int(image.shape[1] - (th + i)), "crop_t": i})
+        params.update({
+            "crop_l": j,
+            "crop_r": int(image.shape[2] - (tw + j)),
+            "crop_b": int(image.shape[1] - (th + i)),
+            "crop_t": i,
+            "crop_h": int(th),
+            "crop_w": int(tw),
+        })
         return cropped_image, segments, removals == 0
 
     def __repr__(self):

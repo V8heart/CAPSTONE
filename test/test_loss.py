@@ -31,7 +31,14 @@ from yolino.eval.matcher_cell import CellMatcher
 from yolino.eval.matcher_uv import UVMatcher
 from yolino.grid.grid_factory import GridFactory
 from yolino.model.anchors import Anchor
-from yolino.model.loss import get_loss, NormLoss, MeanSquaredErrorLoss, CrossEntropyCellLoss
+from yolino.model.loss import (
+    get_loss,
+    grid_loss_weights_all_zero,
+    NormLoss,
+    MeanSquaredErrorLoss,
+    CrossEntropyCellLoss,
+)
+from yolino.utils.enums import LossWeighting
 from yolino.model.model_factory import load_checkpoint
 from yolino.runner.forward_runner import ForwardRunner
 from yolino.runner.trainer import TrainHandler, TRAIN_TAG
@@ -281,7 +288,7 @@ class TestLoss(unittest.TestCase):
             forward = ForwardRunner(args, model, model_epoch)
 
             images, grid_tensors, filenames, _, _ = next(iter(loader))
-            geom_o, embed_o, _ = forward(images, is_train=True, epoch=model_epoch)
+            geom_o, embed_o, _, _ = forward(images, is_train=True, epoch=model_epoch)
 
             # use 10x the label for duplicate check
             grid_tensors = torch.tile(grid_tensors[:, :, [0], :], [1, 1, args.num_predictors, 1])
@@ -314,7 +321,7 @@ class TestLoss(unittest.TestCase):
             forward = ForwardRunner(args, model, model_epoch)
 
             images, grid_tensors, filenames, _, _ = next(iter(loader))
-            geom_o, embed_o, _ = forward(images, is_train=True, epoch=model_epoch)
+            geom_o, embed_o, _, _ = forward(images, is_train=True, epoch=model_epoch)
 
             loss_weights = TrainHandler.__init_loss_weights__(
                 num_train_vars=len(dataset.coords.train_vars()),
@@ -704,6 +711,14 @@ class TestLoss(unittest.TestCase):
                 losses.append(trainer.losses[TRAIN_TAG]._backprops_[0].item())
             self.assertGreater(losses[0] * 0.8, losses[-1],
                                msg="Expected the loss %s to decrease a lot, but we have got\n%s" % (loss, losses))
+
+
+class TestGridLossSkip(unittest.TestCase):
+    def test_grid_loss_weights_all_zero(self):
+        self.assertTrue(grid_loss_weights_all_zero([0, 0], LossWeighting.FIXED))
+        self.assertTrue(grid_loss_weights_all_zero([0.0, 0.0], LossWeighting.FIXED_NORM))
+        self.assertFalse(grid_loss_weights_all_zero([0, 1], LossWeighting.FIXED))
+        self.assertFalse(grid_loss_weights_all_zero([1], LossWeighting.FIXED))
 
 
 if __name__ == '__main__':

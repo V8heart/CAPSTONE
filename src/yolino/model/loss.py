@@ -24,7 +24,7 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from yolino.eval.distances import linesegment_euclidean_distance
+from yolino.eval.distances import line_segment_iou, linesegment_euclidean_distance
 from yolino.eval.matcher_cell import CellMatcher
 from yolino.model.activations import get_activations
 from yolino.model.variable_structure import VariableStructure
@@ -367,6 +367,108 @@ class FocalConfidenceLoss(AbstractLoss):
         return weighted_loss, mean_loss
 
 
+def quality_focal_bce_with_logits(logits: torch.Tensor, targets: torch.Tensor, beta: float = 2.0) -> torch.Tensor:
+    """Generalized Focal Loss — Quality Focal Loss (GFL, Li et al.).
+
+    L = |y - sigmoid(x)|^beta * BCEWithLogits(x, y), with y in [0, 1].
+    """
+    targets = torch.clamp(targets.to(dtype=logits.dtype), min=0.0, max=1.0)
+    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    pred_sig = torch.sigmoid(logits)
+    scale = (targets - pred_sig).abs().clamp(min=0.0) ** float(beta)
+    loss = scale * bce
+    loss = torch.where(torch.isfinite(loss), loss, torch.zeros_like(loss))
+    return loss.mean()
+
+
+class QualityFocalConfidenceLoss(FocalConfidenceLoss):
+    """Quality Focal Loss on confidence with IoU-aligned soft targets for matched slots.
+
+    Matched predictors receive target conf = line_segment_iou(pred_geom, gt_geom) instead of 1.0,
+    suppressing high-confidence false positives on poor geometry matches (TOOD / YOLOv8 style).
+    """
+
+    def __init__(self, coords: VariableStructure, gpu, cuda, variable: Variables, conf_match_weight,
+                 activation_is_exp, loss_weight_strategy, beta=2.0, iou_floor=0.0, **_focal_kw):
+        super().__init__(
+            coords=coords, gpu=gpu, cuda=cuda, variable=variable,
+            conf_match_weight=conf_match_weight,
+            activation_is_exp=activation_is_exp,
+            loss_weight_strategy=loss_weight_strategy,
+            gamma=2.0, alpha=0.25,
+        )
+        self.qfl_beta = float(beta)
+        self.qfl_iou_floor = float(iou_floor)
+        self._linerep = coords.line_representation.enum
+        self._geom_pred_ix = coords.get_position_within_prediction(Variables.GEOMETRY)
+        self._geom_gt_ix = coords.get_position_of(Variables.GEOMETRY)
+
+    def _soft_targets_matched(self, pred_geom: torch.Tensor, gt_geom: torch.Tensor) -> torch.Tensor:
+        iou = line_segment_iou(pred_geom.detach(), gt_geom, linerep=self._linerep)
+        if self.qfl_iou_floor > 0.0:
+            iou = iou.clamp(min=self.qfl_iou_floor)
+        return iou
+
+    def __call__(self, preds, grid_tensor, tag="none", epoch=None, conf_logits_flat=None):
+        if conf_logits_flat is None:
+            self.function = self._focal_prob_fn
+            preds, grid_tensor, p_unmatched, gt_unmatched = super(FocalConfidenceLoss, self).__call__(
+                preds, grid_tensor
+            )
+            return self.__apply_function__(preds, grid_tensor, p_unmatched, gt_unmatched, tag=tag, epoch=epoch)
+
+        logits_m, _, logits_um, _ = self._prepare_conf_logits_slices(conf_logits_flat, grid_tensor)
+
+        invalid_flags = torch.any(
+            grid_tensor[:, self.coords.get_position_of_training_vars()].isnan(), dim=-1
+        )
+        valid_flags = ~invalid_flags
+        preds_m = preds[valid_flags]
+        gt_m_full = grid_tensor[valid_flags]
+
+        matched_loss = torch.tensor(0.0, device=grid_tensor.device, dtype=grid_tensor.dtype)
+        unmatched_loss = torch.tensor(0.0, device=grid_tensor.device, dtype=grid_tensor.dtype)
+        iou_mean = torch.tensor(float("nan"), device=grid_tensor.device)
+
+        if logits_m.numel() > 0 and gt_m_full.numel() > 0 and not torch.all(gt_m_full.isnan()):
+            pred_geom = preds_m[:, self._geom_pred_ix]
+            gt_geom = gt_m_full[:, self._geom_gt_ix]
+            targets = self._soft_targets_matched(pred_geom, gt_geom)
+            matched_loss = quality_focal_bce_with_logits(logits_m, targets, beta=self.qfl_beta)
+            iou_mean = targets.mean()
+
+        if logits_um.numel() > 0:
+            unmatched_loss = quality_focal_bce_with_logits(
+                logits_um, torch.zeros_like(logits_um), beta=self.qfl_beta
+            )
+
+        normalizing_matched = len(logits_m) if self.reduction == "sum" else 1
+        normalizing_unmatched = len(logits_um) if self.reduction == "sum" else 1
+        mean_matched_loss = matched_loss / normalizing_matched
+        mean_unmatched_loss = unmatched_loss / normalizing_unmatched
+
+        log_dict = {
+            "loss_conf_batch/match/mean": mean_matched_loss,
+            "loss_conf_batch/unmatch/mean": mean_unmatched_loss,
+        }
+        if torch.isfinite(iou_mean):
+            log_dict["loss_conf_batch/match/iou_target_mean"] = iou_mean
+        Log.scalars(tag=tag, dict=log_dict, epoch=epoch)
+
+        add_weights, weight_factors = get_actual_weight(
+            epoch, "conf/match", weight_strategy=self.loss_weight_strategy,
+            weight=self.conf_match_weight[0], activation_is_exponential=self.activation_is_exp,
+        )
+        weighted_loss = weight_factors * matched_loss + add_weights
+        add_weights, weight_factors = get_actual_weight(
+            epoch, "conf/nomatch", weight_strategy=self.loss_weight_strategy,
+            weight=self.conf_match_weight[1], activation_is_exponential=self.activation_is_exp,
+        )
+        weighted_loss += weight_factors * (self.conf_negative_weight * unmatched_loss) + add_weights
+        mean_loss = (mean_matched_loss + mean_unmatched_loss) * 0.5
+        return weighted_loss, mean_loss
+
+
 class MeanSquaredErrorLoss(AbstractLoss):
     def __init__(self, reduction, coords: VariableStructure, gpu, cuda, variable: Variables, batch_size: int,
                  conf_match_weight, activation_is_exp, loss_weight_strategy) -> None:
@@ -686,6 +788,15 @@ def get_loss(losses, args, coords: VariableStructure, weights: list, anchors, co
                                                 loss_weight_strategy=loss_weight_strategy,
                                                 gamma=getattr(args, "focal_gamma", 2.0),
                                                 alpha=getattr(args, "focal_alpha", 0.25)))
+        elif loss == LOSS.QFL_MEAN:
+            functions.append(QualityFocalConfidenceLoss(
+                coords=coords, gpu=args.gpu, cuda=args.cuda, variable=variable,
+                conf_match_weight=conf_weights,
+                activation_is_exp=activation_is_exp,
+                loss_weight_strategy=loss_weight_strategy,
+                beta=getattr(args, "qfl_beta", 2.0),
+                iou_floor=getattr(args, "qfl_iou_floor", 0.0),
+            ))
         elif loss == LOSS.MSE_SUM:
             functions.append(MeanSquaredErrorLoss(reduction="sum", coords=coords, gpu=args.gpu, cuda=args.cuda,
                                                   variable=variable, batch_size=args.batch_size,
@@ -801,6 +912,26 @@ def get_actual_weight(epoch, variable_str, weight_strategy, weight, activation_i
     return add_weight, weight_factor
 
 
+def grid_loss_weights_all_zero(weights, loss_weight_strategy) -> bool:
+    """Return True when every grid-loss term has zero effective multiplier.
+
+    Used to skip :class:`CellMatcher` geometric matching and per-cell loss
+  forward passes when the experiment only trains an E2E head (e.g. exp53 with
+    ``weights: "0,0"``).
+    """
+    if weights is None or len(weights) == 0:
+        return False
+    if isinstance(weights, torch.Tensor):
+        w = weights.detach().float().cpu()
+    else:
+        w = torch.tensor([float(x) for x in weights], dtype=torch.float32)
+    if loss_weight_strategy == LossWeighting.FIXED_NORM:
+        if float(w.abs().sum().item()) <= 1e-12:
+            return True
+        w = w / w.sum()
+    return bool((w.abs() <= 1e-12).all().item())
+
+
 class LossComposition:
     def __init__(self, losses, args, coords: VariableStructure, weights: list, anchors):
         self.add_weights = []
@@ -810,9 +941,17 @@ class LossComposition:
         self.args = args
         self.coords = coords
         self.weights = weights
-        self.matcher = CellMatcher(coords, args)
+        self._skip_grid_loss = grid_loss_weights_all_zero(weights, args.loss_weight_strategy)
+        self.matcher = None if self._skip_grid_loss else CellMatcher(coords, args)
+        self.last_reduced_grid_tensor = None
+        self.last_matched_grid_tensor = None
         self._conf_dist_logged_epochs = set()
         Log.debug("Weights=%s" % self.weights)
+        if self._skip_grid_loss:
+            Log.info(
+                "Grid loss weights are all zero — skipping CellMatcher and grid loss "
+                "(E2E-only training)."
+            )
         if len(self.losses) != len(self.weights):
             raise ValueError("Please specify the same number of loss terms as weights, we got %s loss terms, "
                              "but %s weights." % (self.losses, self.weights))
@@ -874,7 +1013,15 @@ class LossComposition:
                   "(target geom~[B, 1024, 8, vars_train], embed~[B, 1024, 8, 8])"
                   % (tuple(geom_preds.shape), tuple(embed_preds.shape), tuple(grid_tensor.shape)))
 
-        weighted_losses = torch.zeros((1), device=self.args.cuda, dtype=torch.float32)
+        if self._skip_grid_loss:
+            zero = torch.zeros((), device=geom_preds.device, dtype=geom_preds.dtype)
+            losses = [0.0] * len(self.losses)
+            mean_losses = [0.0] * len(self.losses)
+            self.last_reduced_grid_tensor = None
+            self.last_matched_grid_tensor = None
+            return losses, zero, mean_losses
+
+        weighted_losses = torch.zeros((1), device=geom_preds.device, dtype=geom_preds.dtype)
         losses = []
         mean_losses = []
 
@@ -903,6 +1050,14 @@ class LossComposition:
             else:
                 geom_logits_flat = None
 
+        self.last_reduced_grid_tensor = reduced_grid_tensor
+        try:
+            b = int(geom_preds.shape[0])
+            n_slots = int(geom_preds.shape[1]) * int(geom_preds.shape[2])
+            self.last_matched_grid_tensor = reduced_grid_tensor.view(b, n_slots, -1)
+        except Exception:
+            self.last_matched_grid_tensor = None
+
         self._log_confidence_distribution(geom_preds_flat=geom_preds_flat,
                                           reduced_grid_tensor=reduced_grid_tensor,
                                           epoch=epoch, tag=tag)
@@ -930,7 +1085,7 @@ class LossComposition:
                     if t.variable == Variables.INSTANCE:
                         loss_val, mean_loss_val = t(embed_preds_flat, reduced_grid_tensor, tag=tag, epoch=epoch,
                                                     batch_size=batch_size, items_per_image=items_per_image)
-                    elif isinstance(t, FocalConfidenceLoss) and geom_logits_flat is not None:
+                    elif isinstance(t, (FocalConfidenceLoss, QualityFocalConfidenceLoss)) and geom_logits_flat is not None:
                         loss_val, mean_loss_val = t(geom_preds_flat, reduced_grid_tensor, tag=tag, epoch=epoch,
                                                     conf_logits_flat=geom_logits_flat)
                     else:

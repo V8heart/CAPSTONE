@@ -175,9 +175,10 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
                                   "Both expose `backbone.body.*` so layer-wise LR groups "
                                   "(`--lr_backbone/--lr_fpn/...`) and freeze logic behave identically.")
     model_group.add_argument("--timm_model_name", type=str, default="resnet50_dilated",
-                             choices=["resnet50_dilated", "hrnet_w32"],
+                             choices=["resnet50_dilated", "resnet50", "hrnet_w32"],
                              help="Only used when --backbone=timm. "
-                                  "resnet50_dilated=ResNet-50 output_stride=16, "
+                                  "resnet50_dilated=ResNet-50 output_stride=16 (atrous stage-4), "
+                                  "resnet50=ResNet-50 output_stride=32 (no dilated stage-4; C4 from final stage), "
                                   "hrnet_w32=standard HRNet-W32.")
     model_group.add_argument("--darknet_cfg", type=str, default="model/cfg/darknet19_448_d2.cfg",
                              help="Path to the darknet config. Will be appended to the root path.")
@@ -188,6 +189,667 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
     add_num_predictors(model_group)
     model_group.add_argument("--embed_dim", type=int, default=8,
                              help="Embedding head output channels per predictor (D).")
+    model_group.add_argument(
+        "--e2e_differentiable_postproc", action=ParseBool, default=False,
+        help="If true, attach differentiable E2E head (soft-argmax tokens, optional feature-aware "
+             "transformer affinity, Bézier samples). Original scipy/BFS postproc in line_fit is unchanged.")
+    model_group.add_argument(
+        "--e2e_mode", type=str, default="detr",
+        choices=["detr", "seg_detr", "seg_detr_soft", "std_seg_detr", "gnn", "center", "hough_detr", "learnable_detr"],
+        help="Which E2E head to attach when --e2e_differentiable_postproc=true. "
+             "'detr'          = YolinoDetrBezierHead (Top-K segment anchors → K Bézier curves). "
+             "'seg_detr'      = YolinoSegDetrBezierHead (learned K queries, segment+FPN memory only). "
+             "'seg_detr_soft' = YolinoSegDetrSoftInitBezierHead (segment soft query init + memory; "
+             "see --e2e_soft_query_init). "
+             "'std_seg_detr'  = YolinoGridSegDetrBezierHead (requires --std; optional feat DCN; "
+             "grid tokens, no geom DCN head). "
+             "'gnn'           = YolinoGnnSegmentGraphHead (segment graph → GAT → edge probs). "
+             "'center'        = YolinoCenterPolyHead (Gaussian center heatmap → polylines). "
+             "'hough_detr'    = YolinoHoughDetrPolyHead (exp51: Hough+DBSCAN master anchor → "
+             "5-pt soft ref → LSDA decoder; supports DN/LCDN).",
+    )
+    model_group.add_argument(
+        "--e2e_soft_query_init", type=str, default="residual_topk",
+        choices=["residual_topk", "softmax_pool"],
+        help="When --e2e_mode=seg_detr_soft: 'residual_topk' = Top-K segment token + learnable residual "
+             "+ PE (soft anchor); 'softmax_pool' = learned slot softmax-pools all segment tokens.",
+    )
+    model_group.add_argument(
+        "--e2e_softmax_pool_temperature", type=float, default=1.0,
+        help="Temperature for e2e_soft_query_init=softmax_pool (higher = softer pooling).",
+    )
+    # ----- GNN E2E head options -----
+    model_group.add_argument("--gnn_max_nodes", type=int, default=256,
+                             help="GNN: maximum number of segment nodes per image (top-K by conf among all "
+                                  "cell*predictor segments).")
+    model_group.add_argument("--gnn_node_conf_thresh", type=float, default=0.1,
+                             help="GNN: nodes whose YOLinO conf is below this are kept structurally (so we always "
+                                  "have gnn_max_nodes slots) but flagged invalid for message-passing and loss.")
+    model_group.add_argument(
+        "--gnn_node_use_visual_feat", action=ParseBool, default=True,
+        help="GNN: if false, node tokens are built from segment geometry PE only (no FPN grid_sample feature).",
+    )
+    model_group.add_argument(
+        "--gnn_use_matched_gt_from_geom", action=ParseBool, default=False,
+        help="GNN criterion: reuse geom-head cell-matcher GT assignments per predictor slot as node supervision "
+             "instead of nearest-polyline-vertex assignment.",
+    )
+    model_group.add_argument(
+        "--gnn_supervise_matched_nodes_only", action=ParseBool, default=True,
+        help="GNN edge loss: if true, supervise only edges where BOTH endpoints have a matched GT instance "
+             "(seg_inst>=0). If false (legacy), also supervise edges with one unmatched endpoint as negatives.",
+    )
+    model_group.add_argument(
+        "--gnn_soft_nms", action=ParseBool, default=False,
+        help="GNN: apply segment soft-NMS (lateral d_perp only) on conf before top-k node selection.",
+    )
+    model_group.add_argument("--gnn_soft_nms_mid_sigma_px", type=float, default=16.0,
+                             help="Soft-NMS: sigma_lat for exp(-d_lateral^2/(2*sigma^2)); along-track ignored.")
+    model_group.add_argument("--gnn_soft_nms_min_dir_dot", type=float, default=0.96,
+                             help="Soft-NMS: unused (lateral-only); kept for config compatibility.")
+    model_group.add_argument(
+        "--gnn_soft_nms_decay", type=str, default="linear", choices=["linear", "gaussian"],
+        help="Soft-NMS: 'linear' => score *= (1-overlap); 'gaussian' => score *= exp(-overlap^2).",
+    )
+    model_group.add_argument("--gnn_soft_nms_score_floor", type=float, default=0.001,
+                             help="Soft-NMS: stop propagating decay below this score.")
+    model_group.add_argument("--gnn_soft_nms_prefilter_conf", type=float, default=0.05,
+                             help="Soft-NMS: only run on segments with conf >= this.")
+    model_group.add_argument("--gnn_soft_nms_max_segments", type=int, default=1024,
+                             help="Soft-NMS: max segments per image (top by conf before NMS).")
+    # ----- exp58: conservative segment merge (pre-GNN, geometric fusion) -----
+    model_group.add_argument(
+        "--gnn_segment_merge", action=ParseBool, default=False,
+        help="GNN: physically MERGE near-overlapping/touching parallel segments into a single "
+             "representative before node selection (exp58). Unlike --gnn_soft_nms (conf decay only), "
+             "this clusters segments and replaces each cluster with one segment fitted to the cluster.",
+    )
+    model_group.add_argument("--gnn_segment_merge_lat_px", type=float, default=6.0,
+                             help="Segment merge: max symmetric perpendicular distance between segment "
+                                  "lines (pixels). Conservative default ~¼ of a 32-px cell.")
+    model_group.add_argument("--gnn_segment_merge_dir_dot_min", type=float, default=0.98,
+                             help="Segment merge: minimum |dn_i·dn_j| (cosine) to be considered parallel "
+                                  "(0.98 ≈ 11° tolerance).")
+    model_group.add_argument("--gnn_segment_merge_end_gap_px", type=float, default=8.0,
+                             help="Segment merge: max endpoint-to-endpoint distance to bridge non-overlapping "
+                                  "co-linear segments (along-track stitch).")
+    model_group.add_argument("--gnn_segment_merge_iters", type=int, default=3,
+                             help="Segment merge: max fixed-point iterations.")
+    model_group.add_argument("--gnn_segment_merge_prefilter_conf", type=float, default=0.05,
+                             help="Segment merge: only segments with conf >= this enter the merge pool.")
+    model_group.add_argument(
+        "--gnn_use_hard_geom_gate", action=ParseBool, default=True,
+        help="GNN: if true, apply hard lateral/along/end/dir geometry masks to neigh_valid (exp43). "
+             "If false, keep all valid node pairs and use soft geom prior instead (exp55).",
+    )
+    model_group.add_argument(
+        "--gnn_soft_geom_gate", action=ParseBool, default=False,
+        help="GNN: add log(edge_prior) bias from lateral×dir soft gate (exp55).",
+    )
+    model_group.add_argument("--gnn_soft_geom_sigma_lat_px", type=float, default=32.0,
+                             help="Soft geom prior: lateral decay sigma (pixels).")
+    model_group.add_argument("--gnn_soft_geom_dir_floor", type=float, default=0.5,
+                             help="Soft geom prior: ReLU floor on |dir_i·dir_j|.")
+    model_group.add_argument("--gnn_soft_geom_prior_eps", type=float, default=1e-6,
+                             help="Soft geom prior: clamp/log stability epsilon.")
+    model_group.add_argument(
+        "--gnn_adjacency_mode", type=str, default="global",
+        choices=["global", "knn", "directional2", "directional2_ctx", "directional2_global"],
+        help="GNN: 'global' = all N×N directed edges (subject to masks); 'directional2' = at most two "
+             "collinear candidates per node (forward/back along segment direction, K=2); "
+             "'directional2_ctx' = GAT+edge+loss on cat(on-line,context) K; CC/viz/degree/RW on on-line only; "
+             "'directional2_global' = GAT on global N×N; edge+loss on Euclidean top-gnn_knn_k "
+             "(optional gnn_knn_min_dir_dot direction filter); "
+             "'knn' = legacy top-k neighbours by Euclidean midpoint distance only.",
+    )
+    model_group.add_argument("--gnn_knn_k", type=int, default=16,
+                             help="GNN: when gnn_adjacency_mode=knn, number of nearest neighbours per node; "
+                             "when directional2_global, connection/edge candidate count (Euclidean).")
+    model_group.add_argument(
+        "--gnn_knn_min_dir_dot", type=float, default=0.0,
+        help="GNN: when directional2_global (or kNN with dir filter), require |dir_i·dir_j| >= this "
+             "before counting a midpoint neighbour (0=off). 0.8 ≈ ~20%% direction mismatch allowed.",
+    )
+    model_group.add_argument(
+        "--gnn_directional_min_sep_px", type=float, default=8.0,
+        help="GNN: when gnn_adjacency_mode=directional2, minimum signed along-track separation (px) "
+             "to count as forward/backward candidate.",
+    )
+    model_group.add_argument(
+        "--gnn_directional_k", type=int, default=2,
+        help="GNN: when gnn_adjacency_mode=directional2, total directed neighbour slots per node "
+             "(ceil(K/2) forward + floor(K/2) backward along segment direction, after hard geom gate). "
+             "Ignored when gnn_directional_include_all=true.",
+    )
+    model_group.add_argument(
+        "--gnn_directional_include_all", action=ParseBool, default=False,
+        help="GNN: include ALL on-line hard-gate neighbours per node (variable K padded to batch max) "
+             "instead of top gnn_directional_k directional slots.",
+    )
+    model_group.add_argument(
+        "--gnn_context_k", type=int, default=4,
+        help="GNN: when gnn_adjacency_mode=directional2_ctx, parallel-wire context slots per node "
+             "(GAT only; excluded from edge MLP and BCE).",
+    )
+    model_group.add_argument(
+        "--gnn_context_lat_min_px", type=float, default=12.0,
+        help="GNN context slots: minimum perpendicular offset (px) from source line.",
+    )
+    model_group.add_argument(
+        "--gnn_context_lat_max_px", type=float, default=40.0,
+        help="GNN context slots: maximum perpendicular offset (px) from source line.",
+    )
+    model_group.add_argument(
+        "--gnn_context_max_along_px", type=float, default=200.0,
+        help="GNN context slots: max |along-track| separation (px); 0 disables.",
+    )
+    model_group.add_argument(
+        "--gnn_context_min_dir_dot", type=float, default=0.85,
+        help="GNN context slots: minimum |dir_i·dir_j| for parallel-wire candidates.",
+    )
+    model_group.add_argument("--gnn_max_lateral_px", type=float, default=48.0,
+                             help="GNN (global adjacency): hard-mask edges where perpendicular distance from "
+                                  "destination midpoint to source segment line exceeds this (pixels). "
+                                  "0 disables lateral masking (not recommended for global mode).")
+    model_group.add_argument(
+        "--gnn_max_lateral_sym", action=ParseBool, default=False,
+        help="GNN: if true, also require source midpoint within gnn_max_lateral_px of dest segment line "
+             "(symmetric same-line test).",
+    )
+    model_group.add_argument(
+        "--gnn_lateral_on_overlap_only", action=ParseBool, default=False,
+        help="GNN hard gate: apply lateral distance threshold only when |along-track s| is within "
+             "gnn_lateral_overlap_window_px (overlap zone). Outside overlap zone, lateral gate is skipped.",
+    )
+    model_group.add_argument(
+        "--gnn_lateral_overlap_window_px", type=float, default=24.0,
+        help="GNN hard gate with gnn_lateral_on_overlap_only=true: overlap-zone half-width on |s| (px).",
+    )
+    model_group.add_argument(
+        "--gnn_max_along_px", type=float, default=0.0,
+        help="GNN: hard-mask edges when |along-track s| from source mid to dest mid exceeds this (px). "
+             "0 disables. Reduces long-range links on the same infinite line.",
+    )
+    model_group.add_argument(
+        "--gnn_max_end_gap_px", type=float, default=0.0,
+        help="GNN: hard-mask edges when min endpoint distance (four pairings) exceeds this (px). "
+             "0 disables. Enforces stitchable segment ends.",
+    )
+    model_group.add_argument(
+        "--gnn_min_dir_dot", type=float, default=0.0,
+        help="GNN: hard-mask edges when |dir_i·dir_j| is below this (0 disables). e.g. 0.96 ≈ 16° max misalignment.",
+    )
+    model_group.add_argument("--gnn_edge_radius_px", type=float, default=0.0,
+                             help="GNN: optional pixel cap on midpoint distance; masked edges are excluded. "
+                                  "0 disables. Applies to both adjacency modes.")
+    model_group.add_argument("--gnn_gat_layers", type=int, default=3,
+                             help="GNN: number of stacked GAT message-passing layers.")
+    model_group.add_argument(
+        "--gnn_token_dim", type=int, default=None,
+        help="GNN: hidden dim for segment node encoding (geom PE + optional visual fuse, GAT, edge MLP). "
+             "Defaults to --e2e_token_dim (256) when unset.",
+    )
+    model_group.add_argument("--gnn_heads", type=int, default=4,
+                             help="GNN: number of attention heads per GAT layer (must divide gnn token dim).")
+    model_group.add_argument("--gnn_dropout", type=float, default=0.1,
+                             help="GNN: dropout on attention weights and FFN inside GAT layers.")
+    model_group.add_argument(
+        "--gnn_edge_feat_signed", action=ParseBool, default=False,
+        help="GNN edge MLP: use signed dir_dot/along + segment lengths (11-D) instead of "
+             "180°-safe |dir_dot|/|along| (9-D legacy).",
+    )
+    model_group.add_argument(
+        "--gnn_gat_geom_bias", action=ParseBool, default=False,
+        help="GNN GAT: add fixed geometric bias to attention logits "
+             "(exp(-|along|/tau_a) - w_lat*lateral/tau_l).",
+    )
+    model_group.add_argument(
+        "--gnn_gat_geom_bias_w_along", type=float, default=1.0,
+        help="GNN GAT geom bias: weight on exp(-|along|/tau_along) term.",
+    )
+    model_group.add_argument(
+        "--gnn_gat_geom_bias_w_lat", type=float, default=0.5,
+        help="GNN GAT geom bias: weight on lateral/tau_lat penalty term.",
+    )
+    model_group.add_argument(
+        "--gnn_gat_geom_bias_tau_along", type=float, default=40.0,
+        help="GNN GAT geom bias: along-track decay scale in pixels.",
+    )
+    model_group.add_argument(
+        "--gnn_gat_geom_bias_tau_lat", type=float, default=20.0,
+        help="GNN GAT geom bias: lateral offset scale in pixels.",
+    )
+    model_group.add_argument("--gnn_loss_weight", type=float, default=0.0,
+                             help="GNN: weight on the connectivity BCE term (0 disables supervised GNN loss).")
+    model_group.add_argument("--gnn_warmup_epochs", type=int, default=0,
+                             help="GNN: linear ramp epochs for gnn_loss_weight after gnn_warmup_start_epoch.")
+    model_group.add_argument("--gnn_warmup_start_epoch", type=int, default=0,
+                             help="GNN: first epoch index (0-based) at which the GNN loss ramp may begin.")
+    model_group.add_argument("--gnn_pos_weight", type=float, default=1.0,
+                             help="GNN: pos_weight for BCEWithLogits on the positive class (same-instance edges). "
+                                  "Also multiplies the positive term when --gnn_edge_loss_type=focal.")
+    model_group.add_argument("--gnn_neg_weight", type=float, default=1.0,
+                             help="GNN: extra multiplicative weight for negative edges in BCE/focal. "
+                                  "Use >1 to penalize false connections more strongly.")
+    model_group.add_argument(
+        "--gnn_cross_instance_weight", type=float, default=10.0,
+        help="GNN cross_ignore loss: BCE weight on cross-instance edges (label 0). "
+             "Same-instance non-adjacent pairs are ignored unless --gnn_same_inst_ignore_as_pos.",
+    )
+    model_group.add_argument(
+        "--gnn_same_inst_ignore_as_pos", action=ParseBool, default=False,
+        help="GNN cross_ignore + polyline_adjacent: train same-instance non-adjacent edges as "
+             "positives (label 1) with --gnn_pos_weight_remote instead of ignoring them.",
+    )
+    model_group.add_argument(
+        "--gnn_pos_weight_remote", type=float, default=1.0,
+        help="GNN cross_ignore: BCE weight for same-instance non-adjacent positives when "
+             "--gnn_same_inst_ignore_as_pos is true.",
+    )
+    model_group.add_argument("--gnn_neg_per_pos", type=int, default=8,
+                             help="GNN: max ratio of sampled negative edges to positives per batch (0 disables "
+                                  "subsampling — all valid negatives contribute).")
+    model_group.add_argument(
+        "--gnn_neg_min_kept", type=int, default=8,
+        help="GNN: when subsampling negatives, keep at least this many negatives per batch item "
+             "(floor on neg_per_pos * n_pos). Set 2–3 for lighter negative pressure.",
+    )
+    model_group.add_argument(
+        "--gnn_edge_loss_type", type=str, default="bce",
+        choices=["bce", "focal", "cross_ignore"],
+        help="GNN edge loss: 'bce'/'focal' = all non-positives as negatives; "
+             "'cross_ignore' = pos=polyline_adjacent, ignore=same-inst non-adj, "
+             "cross-inst negatives with gnn_cross_instance_weight.",
+    )
+    model_group.add_argument(
+        "--gnn_focal_alpha", type=float, default=0.75,
+        help="GNN focal: α on positive edges (1-α on negatives). Use >0.5 when positives are rare.",
+    )
+    model_group.add_argument(
+        "--gnn_focal_gamma", type=float, default=2.0,
+        help="GNN focal: γ focusing parameter (down-weights easy negatives).",
+    )
+    model_group.add_argument("--gnn_node_assign_radius_px", type=float, default=24.0,
+                             help="GNN criterion: max pixel distance from a node midpoint to a GT polyline vertex "
+                                  "for the node to be labelled as foreground (-1 otherwise).")
+    model_group.add_argument(
+        "--gnn_edge_supervision", type=str, default="matched_instance",
+        choices=["matched_instance", "polyline_adjacent"],
+        help="GNN edge labels: matched_instance = all same-instance candidate pairs; "
+             "polyline_adjacent = same instance AND endpoint stitch within gnn_polyline_adjacent_end_px.",
+    )
+    model_group.add_argument(
+        "--gnn_polyline_adjacent_end_px", type=float, default=12.0,
+        help="GNN polyline_adjacent: max endpoint distance (px) for a positive edge.",
+    )
+    model_group.add_argument(
+        "--gnn_eval_edge_threshs", type=str, default="0.35,0.5",
+        help="GNN val: comma-separated sigmoid thresholds for edge precision/recall/F1 (logged as edge_f1_*).",
+    )
+    model_group.add_argument(
+        "--gnn_use_strict_next_hop", action=ParseBool, default=False,
+        help="GNN: if true, BCE positives only for GT-polyline vertex-adjacent segment pairs (|Δvidx|==1); "
+             "otherwise keep legacy 'same instance' positives.",
+    )
+    model_group.add_argument(
+        "--gnn_next_hop_allow_closed", action=ParseBool, default=False,
+        help="GNN strict next-hop: also treat first/last GT vertex as adjacent (closed polylines).",
+    )
+    model_group.add_argument(
+        "--gnn_rw_steps", type=int, default=6,
+        help="GNN RW topology / soft_rw Chamfer: number of random-walk steps (Tk = T^steps).",
+    )
+    model_group.add_argument(
+        "--gnn_rw_pos_weight", type=float, default=20.0,
+        help="GNN RW topology loss: positive-class weight for same-instance pairs.",
+    )
+    model_group.add_argument(
+        "--gnn_rw_topology_weight", type=float, default=0.0,
+        help="GNN: weight on random-walk topology BCE loss (0 disables).",
+    )
+    model_group.add_argument(
+        "--gnn_rw_start_epoch", type=int, default=0,
+        help="GNN RW topology: first epoch index (0-based) to enable RW loss weight.",
+    )
+    model_group.add_argument(
+        "--gnn_cc_edge_thresh", type=float, default=0.3,
+        help="GNN val instance IoU: CC edge threshold on sigmoid(edge_logit).",
+    )
+    model_group.add_argument(
+        "--gnn_degree_loss_weight", type=float, default=0.0,
+        help="GNN: weight on soft out-degree / in-degree penalty (0 disables). Uses sigmoid(edge_logit).",
+    )
+    model_group.add_argument("--gnn_degree_row_cap", type=float, default=1.0,
+                             help="GNN degree loss: ReLU margin for sum_j sigmoid(logit_ij) per source row.")
+    model_group.add_argument("--gnn_degree_col_cap", type=float, default=1.0,
+                             help="GNN degree loss: ReLU margin for sum_i sigmoid(logit_ij) per destination column.")
+    model_group.add_argument(
+        "--gnn_chamfer_weight", type=float, default=0.0,
+        help="GNN: weight on differentiable soft-assembly Chamfer term (0 disables).",
+    )
+    model_group.add_argument(
+        "--gnn_assembly_max_nodes_per_inst", type=int, default=32,
+        help="GNN Chamfer: max nodes per GT instance considered in assembly (cap memory).",
+    )
+    model_group.add_argument(
+        "--gnn_assembly_max_instances", type=int, default=8,
+        help="GNN Chamfer: max GT instances per batch item to supervise (cap memory).",
+    )
+    model_group.add_argument(
+        "--gnn_chamfer_warmup_epochs", type=int, default=0,
+        help="GNN Chamfer: linear ramp epochs for gnn_chamfer_weight after gnn_chamfer_warmup_start_epoch.",
+    )
+    model_group.add_argument(
+        "--gnn_chamfer_warmup_start_epoch", type=int, default=0,
+        help="GNN Chamfer: first epoch (0-based) when Chamfer weight ramp may begin.",
+    )
+    model_group.add_argument(
+        "--gnn_assembly_tier", type=str, default="soft_chain",
+        choices=["soft_chain", "soft_rw", "none"],
+        help="GNN assembly: soft_chain | soft_rw (Tk@mids) | none.",
+    )
+    model_group.add_argument(
+        "--gnn_tb_viz_conf_thresh", type=float, default=None,
+        help="GNN val TensorBoard overlay: minimum node confidence to draw segments (default: use --confidence). "
+             "Set lower than gnn_node_conf_thresh to visualize more nodes during training.",
+    )
+    model_group.add_argument("--gnn_overlay_edge_thresh", type=float, default=0.5,
+                             help="GNN val overlay: draw an edge in TB only if sigmoid(edge_logit) >= this value.")
+    model_group.add_argument(
+        "--gnn_tb_show_lonely_segments", action=ParseBool, default=True,
+        help="GNN val TensorBoard overlay: draw valid nodes that have no edge above "
+             "--gnn_overlay_edge_thresh in neutral gray (unmerged segments).",
+    )
+    model_group.add_argument(
+        "--gnn_tb_segment_thickness", type=int, default=3,
+        help="GNN val TB overlay: line thickness for YOLinO segment endpoints (end_a–end_b) per node.",
+    )
+    model_group.add_argument(
+        "--gnn_tb_connector_thickness", type=int, default=2,
+        help="GNN val TB overlay: line thickness for predicted mid–mid connector edges.",
+    )
+    # ----- Center-DETR (--e2e_mode=center) head options -----
+    model_group.add_argument("--center_num_queries", type=int, default=20,
+                             help="Center head: K = top-K center peaks (initial polyline-instance queries).")
+    model_group.add_argument("--center_num_points", type=int, default=10,
+                             help="Center head: N = number of point-queries per instance (final polyline points).")
+    model_group.add_argument("--center_decoder_layers", type=int, default=4,
+                             help="Center head: decoder layers (each: self-attn over K*N + localized cross-attn + Δref).")
+    model_group.add_argument("--center_decoder_heads", type=int, default=8,
+                             help="Center head: attention heads per decoder layer (must divide --e2e_token_dim).")
+    model_group.add_argument("--center_decoder_ff", type=int, default=1024,
+                             help="Center head: FFN inner dim per decoder layer.")
+    model_group.add_argument("--center_dropout", type=float, default=0.1,
+                             help="Center head: dropout in attention/FFN.")
+    model_group.add_argument("--center_local_radius_px", type=float, default=64.0,
+                             help="Center head: cross-attn mask radius. Only memory tokens within this pixel "
+                                  "distance from the peak (per-center) contribute. 0 disables masking.")
+    model_group.add_argument("--center_mask_mode", type=str, default="per_center",
+                             choices=["per_center", "per_point"],
+                             help="Cross-attn mask granularity. 'per_center' computes distance once per K peak "
+                                  "and expands to N; 'per_point' uses per-point ref_xy (future work).")
+    model_group.add_argument("--center_init_spread_px", type=float, default=32.0,
+                             help="Initial spread of N point-queries along x around each peak (symmetry break, "
+                                  "linspace(-1,1,N)*spread). Set 0 to start collapsed.")
+    model_group.add_argument("--center_nms_kernel", type=int, default=3,
+                             help="Center heatmap peak NMS via F.max_pool2d (odd kernel).")
+    model_group.add_argument("--center_peak_thresh", type=float, default=0.05,
+                             help="Min sigmoid(center_logit) for a peak to be selected (top-K still capped at K).")
+    model_group.add_argument(
+        "--center_peak_nms_dist_px", type=float, default=12.0,
+        help="Center head: after heatmap local-max filtering, greedily pick up to K peaks in score order while "
+             "rejecting any candidate whose pixel center is within this distance of an already picked peak "
+             "(duplicate suppression). 0 disables this second-stage NMS.",
+    )
+    model_group.add_argument(
+        "--center_delta_bound", type=str, default="tanh",
+        choices=["tanh", "sigmoid_signed", "none"],
+        help="Center head: bound per-layer Δxy from the decoder MLP before adding to ref_xy. "
+             "'tanh' = tanh(raw)*max_px (smooth, signed). 'sigmoid_signed' = (2*sigmoid(raw)-1)*max_px "
+             "(normalized [-1,1] then scaled). 'none' = raw MLP output (can explode early).",
+    )
+    model_group.add_argument(
+        "--center_delta_max_px", type=float, default=64.0,
+        help="Center head: max |Δx| and |Δy| per layer in pixels when --center_delta_bound is not 'none'. "
+             "Typical range: stride~2×stride or ~local_radius/2.",
+    )
+    model_group.add_argument("--center_focal_alpha", type=float, default=2.0,
+                             help="Gaussian focal loss α (penalty on miss-detected peaks). CornerNet/CenterNet convention.")
+    model_group.add_argument("--center_focal_beta", type=float, default=4.0,
+                             help="Gaussian focal loss β (penalty on negatives near a GT center).")
+    model_group.add_argument("--center_loss_weight", type=float, default=0.0,
+                             help="Center: total weight on the combined center loss. 0 disables center supervision.")
+    model_group.add_argument("--center_warmup_epochs", type=int, default=0,
+                             help="Center: linear ramp epochs for --center_loss_weight after warmup_start.")
+    model_group.add_argument("--center_warmup_start_epoch", type=int, default=0,
+                             help="Center: first epoch (0-based) at which the loss ramp may begin.")
+    model_group.add_argument("--center_focal_weight", type=float, default=1.0,
+                             help="Inside center loss: weight for Gaussian focal heatmap term.")
+    model_group.add_argument("--center_poly_weight", type=float, default=5.0,
+                             help="Inside center loss: weight for bidirectional N-point L1 term.")
+    model_group.add_argument("--center_aux_weight", type=float, default=0.5,
+                             help="Inside center loss: weight for deep-supervision aux (intermediate decoder layers).")
+    model_group.add_argument("--center_endpoint_weight", type=float, default=0.0,
+                             help="Inside center loss: extra L1 weight on first/last polyline points (0 = off).")
+    model_group.add_argument("--center_bidirectional_l1", action=ParseBool, default=True,
+                             help="Use bidirectional min L1 (MapTR-style) for open polylines.")
+    model_group.add_argument("--center_match_radius_px", type=float, default=24.0,
+                             help="Center criterion: max pixel distance between a predicted peak and a GT center "
+                                  "for the (peak ↔ instance) match to be eligible.")
+    model_group.add_argument(
+        "--center_poly_match_mode", type=str, default="greedy_1to1",
+        choices=["greedy_1to1", "nearest"],
+        help="Polyline L1: 'greedy_1to1' = sort valid (peak,GT) pairs by distance and greedily assign so each GT "
+             "gets at most one peak and each peak at most one GT (MapTR-style set matching approximation). "
+             "'nearest' = each peak independently picks nearest GT (allows duplicates).",
+    )
+    model_group.add_argument("--center_gt_query_p", type=float, default=0.5,
+                             help="Center training: probability per peak slot to teacher-force its query with a GT "
+                                  "center instead of the predicted peak (helps early convergence).")
+    model_group.add_argument("--center_tb_peak_thresh", type=float, default=0.3,
+                             help="Center val TB overlay: score gate for drawing polylines/peaks. "
+                                  "The trainer uses min(this, --center_peak_thresh) so early training "
+                                  "is not blank when this is stricter than peak extraction.")
+    model_group.add_argument("--center_tb_thickness", type=int, default=3,
+                             help="Center val TB overlay: polyline thickness.")
+    model_group.add_argument("--center_tb_show_heatmap", action=ParseBool, default=True,
+                             help="Center val TB overlay: draw the center heatmap as a translucent layer.")
+    model_group.add_argument("--center_tb_heatmap_alpha", type=float, default=0.12,
+                             help="Center val TB: blend weight for colormap heatmap (0=off visually, 1=heatmap only). "
+                                  "Lower values reduce the 'blue filter' cast from Jet-style maps.")
+    model_group.add_argument(
+        "--center_tb_heatmap_colormap", type=str, default="hot",
+        choices=["hot", "jet", "inferno", "turbo"],
+        help="OpenCV colormap name for the center heatmap. 'hot' uses black→red→yellow for low→high "
+             "(low scores stay dark). 'jet' maps low scores to blue and often tints the whole image.",
+    )
+    # ----- exp51: YOLinO-DETR Hough Hybrid head (--e2e_mode=hough_detr) -----
+    model_group.add_argument(
+        "--e2e_hough_dbscan_eps", type=float, default=0.05,
+        help="Hough head: DBSCAN eps in normalized (rho/diag, theta/(pi/2)) space.",
+    )
+    model_group.add_argument(
+        "--e2e_hough_dbscan_min_samples", type=int, default=2,
+        help="Hough head: DBSCAN min_samples per cluster.",
+    )
+    model_group.add_argument(
+        "--e2e_hough_rho_weight", type=float, default=1.0,
+        help="Hough head: weight on the rho axis of the DBSCAN feature vector.",
+    )
+    model_group.add_argument(
+        "--e2e_hough_theta_weight", type=float, default=1.0,
+        help="Hough head: weight on the theta axis of the DBSCAN feature vector.",
+    )
+    model_group.add_argument(
+        "--e2e_hough_seg_conf_thresh", type=float, default=0.3,
+        help="Hough head: minimum YOLinO segment conf to enter the DBSCAN pool.",
+    )
+    model_group.add_argument(
+        "--e2e_hough_max_segments", type=int, default=512,
+        help="Hough head: per-image cap on segments fed to DBSCAN (Top-K by conf).",
+    )
+    model_group.add_argument(
+        "--e2e_hough_L_init_default", type=float, default=0.3,
+        help="Hough head: fallback / lower-bound on normalized L_init "
+             "(``L_init = max(span_norm, default*0.3)``) — prevents 5-pt collapse.",
+    )
+    model_group.add_argument(
+        "--e2e_hough_pt_radius_norm", type=float, default=0.08,
+        help="Hough head: per-keypoint LSDA radius in normalized image units (×img_w). "
+             "Default 0.08 ≈ 80 px on a 1024-wide image.",
+    )
+    model_group.add_argument(
+        "--e2e_hough_max_step_norm", type=float, default=0.05,
+        help="Hough head: per-layer max |Δxy| in normalized units (tanh × this).",
+    )
+    model_group.add_argument(
+        "--e2e_hough_mem_encoder_layers", type=int, default=1,
+        help="Hough head: Path B TransformerEncoder depth (0 = PE+linear only).",
+    )
+    model_group.add_argument(
+        "--e2e_hough_aux_layer_weight", type=float, default=0.1,
+        help="Hough head: weight on the deep-supervision aux loss (independent "
+             "Hungarian per intermediate decoder layer).",
+    )
+    model_group.add_argument(
+        "--e2e_hough_dn_mode", type=str, default="simple",
+        choices=["none", "simple", "lcdn"],
+        help="Hough head: denoising training mode. 'simple' = Gaussian xy on GT 5-pt; "
+             "'lcdn' = jitter anchor params (cx, cy, theta, L) then reconstruct 5-pt.",
+    )
+    model_group.add_argument(
+        "--e2e_hough_dn_groups", type=int, default=3,
+        help="Hough head: number of DN copies per GT polyline.",
+    )
+    model_group.add_argument(
+        "--e2e_hough_dn_sigma_xy", type=float, default=0.05,
+        help="Hough head: stddev of DN xy noise in normalized image coords.",
+    )
+    model_group.add_argument(
+        "--e2e_hough_dn_length_scale", type=float, default=0.2,
+        help="Hough head (LCDN): half-range of length scale jitter (L *= 1 + U[-r, r]).",
+    )
+    model_group.add_argument(
+        "--e2e_hough_dn_rot_deg", type=float, default=10.0,
+        help="Hough head (LCDN): half-range of rotation jitter in degrees.",
+    )
+    model_group.add_argument(
+        "--e2e_hough_dn_loss_weight", type=float, default=0.5,
+        help="Hough head: weight on the DN direct L1 loss (paired i↔i with clean GT).",
+    )
+    # ----- exp53: learnable-query DETR head (--e2e_mode=learnable_detr) -----
+    # The learnable_detr head reuses the Hough DN / decoder / token knobs above
+    # (same names, same defaults). The only new knob is the DN cut-off epoch:
+    # past that epoch, DN slots are no longer generated so the decoder runs the
+    # matching block alone (matches the inference path).
+    model_group.add_argument(
+        "--e2e_dn_off_epoch", type=int, default=-1,
+        help="learnable_detr head: training epoch at and after which the DN branch is "
+             "disabled (DN queries/targets are skipped, decoder sees matching queries "
+             "only). Use to anneal away from the DN warm-start near the end of training. "
+             "-1 keeps DN on for the entire schedule.",
+    )
+    # GT canonicalization for the 5-pt head (also useful for other heads).
+    model_group.add_argument(
+        "--e2e_gt_canonicalize", action=ParseBool, default=True,
+        help="TTPLA: re-order each GT polyline after augmentation so vertices go "
+             "left→right (or top→bottom when nearly vertical). Source of truth for "
+             "the 5-pt head's ordering. Disable to fall back to legacy load-time flip only.",
+    )
+    model_group.add_argument(
+        "--e2e_gt_vertical_angle_deg", type=float, default=80.0,
+        help="TTPLA canonicalize: angle (degrees from horizontal) at or above which a "
+             "polyline is treated as vertical (use y-sort instead of x-sort).",
+    )
+    model_group.add_argument(
+        "--e2e_feature_aware_attention", action=ParseBool, default=True,
+        help="When e2e_differentiable_postproc: use F.grid_sample on FPN features for token embeddings. "
+             "If false, geometry-only MLP tokens (ablation).")
+    model_group.add_argument("--e2e_cross_image_context", action=ParseBool, default=False,
+                             help="When e2e: add lightweight global pooled image context to tokens.")
+    model_group.add_argument("--e2e_window_size", type=int, default=3,
+                             help="Odd local window for spatial softmax (Phase 1).")
+    model_group.add_argument("--e2e_softargmax_temperature", type=float, default=0.5,
+                             help="Temperature for local softmax over conf in the E2E head.")
+    model_group.add_argument("--e2e_token_dim", type=int, default=256,
+                             help="Transformer d_model for E2E head (DETR head uses 256 by default).")
+    model_group.add_argument("--e2e_transformer_heads", type=int, default=4,
+                             help="(legacy) E2E transformer heads. Ignored by the DETR head.")
+    model_group.add_argument("--e2e_transformer_layers", type=int, default=2,
+                             help="(legacy) E2E transformer layers. Ignored by the DETR head.")
+    model_group.add_argument("--e2e_transformer_ff", type=int, default=256,
+                             help="(legacy) E2E transformer FFN width. Ignored by the DETR head.")
+    model_group.add_argument("--e2e_num_queries", type=int, default=20,
+                             help="DETR head: number of polyline queries K (max wires per image).")
+    model_group.add_argument("--e2e_decoder_layers", type=int, default=3,
+                             help="DETR head: number of Transformer decoder layers.")
+    model_group.add_argument("--e2e_decoder_heads", type=int, default=8,
+                             help="DETR head: number of attention heads in the decoder.")
+    model_group.add_argument("--e2e_decoder_ff", type=int, default=1024,
+                             help="DETR head: feed-forward width inside the decoder layers.")
+    model_group.add_argument("--e2e_conf_filter_thresh", type=float, default=0.1,
+                             help="DETR head: conf threshold for valid-token masking before cross-attention.")
+    model_group.add_argument("--e2e_local_max_filter", action=ParseBool, default=False,
+                             help="DETR head: CenterNet-style local-maxima NMS before Top-K query selection. "
+                                  "Per-predictor 2D max-pool on the confidence grid; only cells equal to their "
+                                  "local max survive Top-K. Decoder memory (Keys/Values) is unaffected.")
+    model_group.add_argument("--e2e_local_max_kernel", type=int, default=5,
+                             help="DETR head: kernel size for local-maxima max-pool (odd, e.g. 3 or 5).")
+    model_group.add_argument(
+        "--e2e_bezier_anchor_ctrl_offsets", action=ParseBool, default=True,
+        help="DETR head: if true, ctrl_head outputs offsets in logit space around inverse_sigmoid(ref_norm) "
+             "(anchor-bound). If false, semi-anchor mode: decoder queries still come from Top-K anchors + PE, "
+             "but each control point is sigmoid(ctrl_head) directly in [0,1] image-normalized coords (no ref add).",
+    )
+    model_group.add_argument("--e2e_endpoint_weight", type=float, default=2.0,
+                             help="DETR criterion: extra L1 weight on the two endpoints of each curve.")
+    model_group.add_argument("--e2e_objectness_weight", type=float, default=1.0,
+                             help="DETR criterion: BCE weight for the per-query objectness head.")
+    model_group.add_argument(
+        "--e2e_overlay_objectness_thresh", type=float, default=0.35,
+        help="DETR: val TensorBoard overlay only — draw query k if sigmoid(objectness_logits[k]) >= this "
+             "value in [0,1]. Use 0 or a negative value to disable gating (only drop degenerate curves).",
+    )
+    model_group.add_argument("--e2e_chamfer_aux_weight", type=float, default=0.0,
+                             help="DETR criterion: optional Chamfer auxiliary weight (0 disables).")
+    model_group.add_argument("--e2e_bezier_degree", type=int, default=3, help="Bézier degree (num_ctrl = degree+1).")
+    model_group.add_argument("--e2e_bezier_num_samples", type=int, default=32,
+                             help="Number of uniform t samples along each Bézier curve.")
+    model_group.add_argument(
+        "--e2e_polyline_num_points", type=int, default=0,
+        help="If >0 (e.g. 5), DETR heads output this many polyline points directly (no Bernstein). "
+             "Match e2e_gt_resample_t. Used by std_seg_detr / seg_detr.",
+    )
+    model_group.add_argument(
+        "--e2e_straightness_weight", type=float, default=0.0,
+        help="Extra loss: mean perpendicular distance of interior polyline points to the "
+             "endpoint chord (collinearity / straightness). Requires >=3 points per curve.",
+    )
+    model_group.add_argument(
+        "--e2e_train_with_gt_polylines", action=ParseBool, default=False,
+        help="TTPLA: return fixed-size GT poly packs for E2E Chamfer + Hungarian (requires scipy).")
+    model_group.add_argument("--e2e_loss_weight", type=float, default=0.0,
+                             help="Weight for E2E Chamfer loss (0 disables supervised E2E term).")
+    model_group.add_argument("--e2e_warmup_epochs", type=int, default=0,
+                             help="Linear ramp epochs for e2e_loss_weight after e2e_warmup_start_epoch.")
+    model_group.add_argument("--e2e_warmup_start_epoch", type=int, default=0,
+                             help="First epoch index (0-based) at which E2E loss ramp may begin.")
+    model_group.add_argument("--e2e_hungarian_top_m", type=int, default=128,
+                             help="Top-M confidence tokens before Hungarian matching.")
+    model_group.add_argument("--e2e_normalize_coords", action=ParseBool, default=True,
+                             help="Normalize x,y by (W-1,H-1) in Chamfer.")
+    model_group.add_argument("--e2e_gt_resample_t", type=int, default=32,
+                             help="Uniform arc-length resample count for GT polylines.")
+    model_group.add_argument(
+        "--e2e_gt_chamfer_target", type=str, default="arc_length",
+        choices=["arc_length", "bezier_ls"],
+        help="GT curve for Chamfer: arc_length resample (default) or cubic Bézier least-squares fit "
+             "then uniform t samples (same degree as --e2e_bezier_degree).",
+    )
+    model_group.add_argument("--e2e_gt_max_instances", type=int, default=64,
+                             help="Max GT instances per image (padding).")
+    model_group.add_argument("--e2e_gt_max_points", type=int, default=256,
+                             help="Max vertices per GT instance (padding).")
     model_group.add_argument(
         "--feature_refine", type=str, default="sa_embed_only",
         choices=["none", "sa_embed_only", "sa_shared", "cbam_shared"],
@@ -203,12 +865,41 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
                              choices=["P2", "P3", "P4", "P5"],
                              help="FPN level fed to geometry/embedding heads. "
                                   "P2=stride 8, P3=stride 16, P4=stride 32, P5=stride 32 (when provided). "
-                                  "MUST match --scale (P2:8, P3:16, P4/P5:32).")
+                                  "MUST match --scale (P2:8, P3:16, P4/P5:32). Ignored when --std=true "
+                                  "(always uses P3 + PixelUnshuffle -> stride 32).")
+    model_group.add_argument(
+        "--std", action=ParseBool, default=False,
+        help="If true, use Space-to-Depth head: feats['P3'] -> PixelUnshuffle(2) -> [B,4*C,H/32,W/32], "
+             "then per-predictor modulated DCNv2 for geometry (+ per-predictor 1x1 embed). "
+             "Requires --scale 32. Replaces shared 1x1 self.yolo.",
+    )
+    model_group.add_argument(
+        "--std_skip_geom_head", action=ParseBool, default=False,
+        help="With --std: skip per-predictor geom DCNv2 (zeros geom for grid loss stub). "
+             "Use with --e2e_mode=std_seg_detr and set geom loss weight to 0.",
+    )
+    model_group.add_argument(
+        "--std_feat_dcn_before_e2e", action=ParseBool, default=False,
+        help="With --std: apply shared StdFeatRefineDcn on the STD map before E2E memory.",
+    )
+    model_group.add_argument("--std_feat_dcn_kernel", type=int, default=3,
+                             help="Kernel size for --std_feat_dcn_before_e2e.")
+    model_group.add_argument(
+        "--std_feat_dcn_channels", type=int, default=0,
+        help="Output channels for feat DCN (0 = same as STD channels, 1024 for default fpn_out=256).",
+    )
     model_group.add_argument("--backbone_pretrained", action=ParseBool, default=True,
                              help="Load ImageNet-pretrained ConvNeXt-Tiny weights (True/False).")
     model_group.add_argument("--fpn_upsample_mode", type=str, default="nearest",
                              choices=["nearest", "bilinear"],
                              help="Interpolation mode used inside the FPN top-down path.")
+    model_group.add_argument(
+        "--fpn_norm", type=str, default="groupnorm",
+        choices=["groupnorm", "batchnorm", "syncbatchnorm", "none"],
+        help="Normalization after FPN 3x3 smooth and bottom-up smooth convs. "
+             "Default groupnorm (legacy). exp50: syncbatchnorm for DDP (classic FPN-style BN stats). "
+             "Use batchnorm for single-GPU; none disables norm.",
+    )
     model_group.add_argument("--use_fpn", action=ParseBool, default=True,
                              help="If true, use top-down FPN fusion. "
                                   "If false, skip top-down fusion and use per-level projected backbone features "
@@ -277,6 +968,16 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
     train_group.add_argument("--ddp_find_unused_parameters", action=ParseBool, default=False,
                              help="DDP option for models with conditionally unused params. "
                                   "Keep False for best performance unless needed.")
+    train_group.add_argument(
+        "--log_cuda_mem_after_epoch", action=ParseBool, default=False,
+        help="Rank 0 only: after each training epoch, log torch.cuda memory_allocated and max_memory_allocated (MB) "
+             "to TensorBoard (requires --gpu).",
+    )
+    train_group.add_argument(
+        "--profile_dataloader", action=ParseBool, default=False,
+        help="Rank 0 only: log per-epoch mean data_wait (iterator) and step_compute (forward+backward) "
+             "to TensorBoard under dataloader/*.",
+    )
     train_group.add_argument("--amp", action=ParseBool, default=True,
                              help="Enable mixed precision training (torch.cuda.amp) for stability/performance.")
     train_group.add_argument("--grad_clip_norm", type=float, default=0.0,
@@ -305,6 +1006,9 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
     train_group.add_argument("--lr_embed", required=False, type=float, default=None,
                              help="Optional LR for embedding head (attention/cbam + embed_head). "
                                   "If unset, falls back to --learning_rate.")
+    train_group.add_argument("--lr_e2e", required=False, type=float, default=None,
+                             help="Optional LR for e2e_head.* (differentiable postproc). "
+                                  "If unset, falls back to --lr_embed then --learning_rate.")
     # Loss
     loss_group = parser.add_argument_group("Loss")
     loss_group.add_argument("--loss", type=str, required=True,
@@ -330,6 +1034,10 @@ def define_argparse(config_file="params.yaml", default_config="default_params.ya
                             help="Gamma parameter for focal confidence loss.")
     loss_group.add_argument("--focal_alpha", type=float, default=0.25,
                             help="Alpha parameter for focal confidence loss.")
+    loss_group.add_argument("--qfl_beta", type=float, default=2.0,
+                            help="Quality Focal Loss beta (GFL): |y - sigmoid(logit)|^beta scaling.")
+    loss_group.add_argument("--qfl_iou_floor", type=float, default=0.0,
+                            help="Minimum IoU soft target for matched confidence (QFL).")
     loss_group.add_argument("--match_by_conf_first", action=ParseBool,
                             help="Apply two-stage matching. 1. Only match predictions with confidence > --confidence. "
                                  "2. Match all remaining. This only affects the loss matching, not the evaluation.")

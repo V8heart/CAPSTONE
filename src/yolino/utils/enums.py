@@ -102,6 +102,7 @@ class LOSS(BaseEnum):
     BINARY_CROSS_ENTROPY_SUM = "bce_sum"
     BINARY_CROSS_ENTROPY_MEAN = "bce_mean"
     FOCAL_MEAN = "focal_mean"
+    QFL_MEAN = "qfl_mean"
     MSE_MEAN = "mse_mean"
     MSE_SUM = "mse_sum"
     NORM_MEAN = "norm_mean"

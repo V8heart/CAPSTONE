@@ -37,9 +37,10 @@ def load_checkpoint(args, dataset_specs, load_best=False, allow_failure=True):
     # model = torch.nn.parallel.DistributedDataParallel(model) 
 
     scheduler_checkpoint = {}
+    source_id = "unknown"
     if not args.retrain:
         try:
-            model, scheduler_checkpoint, epoch = get_from_checkpoint(model, args, load_best=load_best)
+            model, scheduler_checkpoint, epoch, source_id = get_from_checkpoint(model, args, load_best=load_best)
         except (FileNotFoundError, ValueError) as fnf_error:
             if allow_failure:
                 Log.warning('No pretrained weights, starting training from scratch, because %s' % fnf_error)
@@ -47,10 +48,24 @@ def load_checkpoint(args, dataset_specs, load_best=False, allow_failure=True):
             else:
                 raise fnf_error
 
+    # If the checkpoint came from a *different* run (i.e. warm-start of a new
+    # experiment from another run's weights, e.g. exp60 loading exp19 ep42 as
+    # trunk init), treat it as init-only: keep the loaded weights but reset
+    # epoch counter and discard the foreign run's scheduler/optimizer state.
+    if epoch != 0 and source_id != "unknown" and source_id != args.id:
+        Log.warning(
+            "Checkpoint run ID=%s differs from current run ID=%s; "
+            "treating as init-only (epoch reset 0, scheduler state dropped)." %
+            (source_id, args.id)
+        )
+        epoch = 0
+        scheduler_checkpoint = {}
+
     if epoch == 0:
         Log.debug("Start training from scratch")
     else:
-        Log.warning('Use pretrain model at epoch %d trained with ID=%s' % (epoch, args.id))
+        Log.warning('Resume from checkpoint at epoch %d (checkpoint run ID=%s; current run ID=%s)' %
+                    (epoch, source_id, args.id))
     return model, scheduler_checkpoint, epoch
 
 
@@ -81,19 +96,14 @@ def get_from_checkpoint(model, args, load_best):
 
     epoch = checkpoint['epoch']
 
-    # Keep args.id as the user-specified run_name (or auto-generated timestamp).
-    # Only log the source checkpoint's original ID for reference.
     source_id = checkpoint.get('ID', 'unknown')
-    if source_id != args.id:
-        Log.info(f"Loaded weights from source run '{source_id}' (epoch {epoch}). "
-                 f"New outputs will be saved under '{args.id}'.")
 
     if "scheduler_state_dict" in checkpoint:
         scheduler_checkpoint = checkpoint['scheduler_state_dict']
     else:
         scheduler_checkpoint = {}
 
-    return model, scheduler_checkpoint, epoch
+    return model, scheduler_checkpoint, epoch, source_id
 
 
 def print_checkpoint(checkpoint):

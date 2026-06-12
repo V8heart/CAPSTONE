@@ -19,13 +19,49 @@
 # ----------------------------- COPYRIGHT ------------------------------------ #
 # ---------------------------------------------------------------------------- #
 
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, default_collate
 
 from yolino.dataset.argoverse20_pytorch import Argoverse2Dataset
 from yolino.dataset.dataset_base import DatasetInfo
 from yolino.utils.enums import Dataset
 from yolino.utils.logger import Log
 from yolino.dataset.ttpla import TTPLADataset
+
+
+def dataloader_worker_init_fn(_worker_id):
+    """Re-apply thread limits inside forked DataLoader workers."""
+    import os
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    import cv2
+    cv2.setNumThreads(0)
+    cv2.ocl.setUseOpenCL(False)
+    try:
+        import torch
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+
+def collate_ttpla_with_optional_e2e_gt(batch):
+    """
+    Same stacking as ``default_collate``, but asserts batched ``e2e_gt`` dict shapes when present
+    (6-tuple samples from :class:`TTPLADataset`).
+    """
+    if not batch:
+        raise ValueError("empty batch")
+    out = default_collate(batch)
+    if len(out) == 6:
+        images, _grid, _fn, _dup, _params, e2e = out
+        b = int(images.shape[0])
+        if e2e["padded"].shape[0] != b or e2e["inst_mask"].shape[0] != b or e2e["pt_mask"].shape[0] != b:
+            raise RuntimeError(
+                "e2e_gt batch shape mismatch: B=%d padded=%s inst=%s pt=%s"
+                % (b, tuple(e2e["padded"].shape), tuple(e2e["inst_mask"].shape), tuple(e2e["pt_mask"].shape))
+            )
+    return out
 
 
 class DatasetFactory:
@@ -94,10 +130,33 @@ class DatasetFactory:
 
             if dataset.is_available():
                 Log.debug("Load data from %s with batch=%d" % (dataset_enum, args.batch_size))
-                loader = DataLoader(dataset, batch_size=args.batch_size,
-                                    shuffle=(shuffle if sampler is None else False),
-                                    sampler=sampler, drop_last=True,
-                                    num_workers=args.loading_workers, pin_memory=args.gpu)
+                collate_fn = None
+                if dataset_enum == Dataset.TTPLA and bool(getattr(args, "e2e_train_with_gt_polylines", False)):
+                    collate_fn = collate_ttpla_with_optional_e2e_gt
+                nw = int(args.loading_workers)
+                loader_kw = dict(
+                    batch_size=args.batch_size,
+                    shuffle=(shuffle if sampler is None else False),
+                    sampler=sampler,
+                    drop_last=True,
+                    num_workers=nw,
+                    pin_memory=args.gpu,
+                )
+                # Reduce fork-after-thread deadlock risk: workers are forked only
+                # **once** at first iter() and reused across epochs via
+                # persistent_workers — instead of being re-forked every epoch end.
+                # We cannot use multiprocessing_context='spawn' here because the
+                # TTPLA dataset object embeds non-picklable thread locks (yolino
+                # Log handlers attached to dataset). The launch script is expected
+                # to set OMP_NUM_THREADS / MKL_NUM_THREADS / OPENBLAS_NUM_THREADS=1
+                # before main() so the one-shot fork has no BLAS threads to copy.
+                if nw > 0:
+                    loader_kw["persistent_workers"] = True
+                    loader_kw["prefetch_factor"] = 2
+                    loader_kw["worker_init_fn"] = dataloader_worker_init_fn
+                if collate_fn is not None:
+                    loader_kw["collate_fn"] = collate_fn
+                loader = DataLoader(dataset, **loader_kw)
                 return dataset, loader
             else:
                 if only_available:
