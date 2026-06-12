@@ -180,15 +180,7 @@ class TTPLADataset(DatasetInfo):
     def _build_e2e_gt_pack(self, lines: torch.Tensor) -> dict:
         """Fixed-size tensors for default_collate + E2E loss (x,y in pixels).
 
-        Additional fields for the center-DETR head (--e2e_mode=center):
-          - ``center_xy``     ``[NI, 2]``  float; arc-length midpoint per instance (x, y).
-                              Zero-padded for invalid slots (mask via ``inst_mask``).
-          - ``poly_length``   ``[NI]``     float; total arc length per instance in pixels.
-
-        Centers are **recomputed from the (post-augment) ``lines`` tensor** so they
-        stay consistent with any crop/rotation. The baked ``centers`` field saved by
-        ``scripts/create_ttpla_yolino_center_detr.py`` is informational only.
-        """
+"""
         args = self.args
         ni = int(getattr(args, "e2e_gt_max_instances", 32))
         mp = int(getattr(args, "e2e_gt_max_points", 128))
@@ -196,14 +188,10 @@ class TTPLADataset(DatasetInfo):
         padded = torch.zeros((ni, mp, 2), device=dev, dtype=dt)
         inst_m = torch.zeros((ni,), device=dev, dtype=torch.bool)
         pt_m = torch.zeros((ni, mp), device=dev, dtype=torch.bool)
-        center_xy = torch.zeros((ni, 2), device=dev, dtype=dt)
-        poly_length = torch.zeros((ni,), device=dev, dtype=dt)
         out = {
             "padded": padded,
             "inst_mask": inst_m,
             "pt_mask": pt_m,
-            "center_xy": center_xy,
-            "poly_length": poly_length,
         }
         if lines is None or lines.dim() < 2:
             return out
@@ -246,25 +234,6 @@ class TTPLADataset(DatasetInfo):
             ys = xy_pts[:, 1]
             inst_m[k] = True
             pt_m[k, :npt] = True
-            # Arc-length midpoint + total length on the augmented polyline.
-            dx = xs[1:] - xs[:-1]
-            dy = ys[1:] - ys[:-1]
-            seg = torch.sqrt(dx * dx + dy * dy).clamp(min=0.0)
-            total = float(seg.sum().item())
-            poly_length[k] = float(total)
-            if total <= 0.0:
-                center_xy[k, 0] = xs[0]
-                center_xy[k, 1] = ys[0]
-            else:
-                half = 0.5 * total
-                cum = torch.cumsum(seg, dim=0).cpu().numpy()
-                jj = int(np.searchsorted(cum, half))
-                jj = max(0, min(jj, npt - 2))
-                prev = float(cum[jj - 1]) if jj > 0 else 0.0
-                denom = float(seg[jj].item())
-                t_frac = (half - prev) / denom if denom > 1e-9 else 0.0
-                center_xy[k, 0] = xs[jj] + t_frac * (xs[jj + 1] - xs[jj])
-                center_xy[k, 1] = ys[jj] + t_frac * (ys[jj + 1] - ys[jj])
         return out
 
     def __len__(self):

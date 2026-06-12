@@ -32,9 +32,7 @@ from yolino.grid.grid_factory import GridFactory
 from yolino.model.activations import get_activations
 from yolino.model.loss import get_loss
 from yolino.model.loss_container import LossContainer
-from yolino.model.yolino_detr_criterion import compute_detr_e2e_loss
 from yolino.model.yolino_gnn_criterion import compute_gnn_e2e_loss
-from yolino.model.yolino_center_criterion import compute_center_e2e_loss
 from yolino.model.model_factory import load_checkpoint, save_best_checkpoint, save_checkpoint
 from yolino.model.optimizer_factory import get_optimizer
 from yolino.runner.evaluator import Evaluator
@@ -162,21 +160,15 @@ class TrainHandler:
         self.losses[VAL_TAG] = LossContainer(report_vars, len(self.val_loader), self.loss_weights)
         self.fixed_val_viz_files = []
 
-        # DETR-head bookkeeping for component-wise TB logging and val-overlay viz.
-        # _detr_loss_buf accumulates per-batch scalars within an epoch; flushed at epoch end.
-        self._detr_loss_buf = {TRAIN_TAG: {}, VAL_TAG: {}}
-        # GNN-head equivalent accumulator (only used when --e2e_mode=gnn).
+        # GNN-head bookkeeping for component-wise TB logging and val-overlay viz.
         self._gnn_loss_buf = {TRAIN_TAG: {}, VAL_TAG: {}}
         self._soft_nms_buf = {TRAIN_TAG: {}, VAL_TAG: {}}
         self._soft_geom_buf = {TRAIN_TAG: {}, VAL_TAG: {}}
         self._gnn_adj_buf = {TRAIN_TAG: {}, VAL_TAG: {}}
-        # Center-head accumulator (used when --e2e_mode=center).
-        self._center_loss_buf = {TRAIN_TAG: {}, VAL_TAG: {}}
-        # _last_e2e_out_by_file caches the latest e2e_out dict per filename in the
-        # current val pass so plot_val_summary can overlay either K=20 Bézier curves
-        # (DETR) or the kNN connectivity graph (GNN).
+        # _last_e2e_out_by_file caches the latest GNN e2e_out dict per filename in the
+        # current val pass so plot_val_summary can overlay the connectivity graph.
         self._last_e2e_out_by_file = {}
-        self._e2e_mode = str(getattr(self.args, "e2e_mode", "detr")).lower()
+        self._e2e_mode = str(getattr(self.args, "e2e_mode", "gnn")).lower()
 
     @staticmethod
     def __init_loss_weights__(num_train_vars, cuda, loss_weighting: LossWeighting, is_exponential,
@@ -313,212 +305,90 @@ class TrainHandler:
                     grid_tensor, geom_preds, embed_preds, epoch=epoch, filenames=filenames,
                     tag=TRAIN_TAG if is_train else VAL_TAG,
                     geom_logits=geom_logits)
-            if _e2e_out is not None:
-                # Dispatch by output keys: DETR head emits bezier_curve_px, GNN head emits edge_logits,
-                # Center head emits center_logits + polylines_px.
-                is_gnn = "edge_logits" in _e2e_out
-                is_center = (not is_gnn) and ("center_logits" in _e2e_out) and ("polylines_px" in _e2e_out)
-                if is_gnn:
-                    e2e_aux = (
-                        _e2e_out["edge_logits"].sum()
-                        + _e2e_out["node_feat"].sum()
-                    ) * 0.0
-                    w_gnn = float(getattr(self.args, "gnn_loss_weight", 0.0) or 0.0)
-                    use_matched_gnn = bool(getattr(self.args, "gnn_use_matched_gt_from_geom", False))
-                    gnn_sup = (
-                        self._build_gnn_matched_supervision(_e2e_out, geom_preds.device)
-                        if use_matched_gnn else None
+            if _e2e_out is not None and "edge_logits" in _e2e_out:
+                e2e_aux = (
+                    _e2e_out["edge_logits"].sum()
+                    + _e2e_out["node_feat"].sum()
+                ) * 0.0
+                w_gnn = float(getattr(self.args, "gnn_loss_weight", 0.0) or 0.0)
+                use_matched_gnn = bool(getattr(self.args, "gnn_use_matched_gt_from_geom", False))
+                gnn_sup = (
+                    self._build_gnn_matched_supervision(_e2e_out, geom_preds.device)
+                    if use_matched_gnn else None
+                )
+                can_gnn_loss = w_gnn > 0.0 and (
+                    e2e_gt_pack is not None
+                    or (use_matched_gnn and gnn_sup is not None)
+                )
+                if can_gnn_loss:
+                    pack_on_dev = None
+                    if e2e_gt_pack is not None:
+                        pack_on_dev = {
+                            k: v.to(geom_preds.device, non_blocking=True)
+                            for k, v in e2e_gt_pack.items()
+                        }
+                    gnn_d = compute_gnn_e2e_loss(
+                        _e2e_out, pack_on_dev,
+                        int(images.shape[2]), int(images.shape[3]),
+                        int(epoch), self.args,
+                        matched_supervision=gnn_sup,
                     )
-                    can_gnn_loss = w_gnn > 0.0 and (
-                        e2e_gt_pack is not None
-                        or (use_matched_gnn and gnn_sup is not None)
-                    )
-                    if can_gnn_loss:
-                        pack_on_dev = None
-                        if e2e_gt_pack is not None:
-                            pack_on_dev = {
-                                k: v.to(geom_preds.device, non_blocking=True)
-                                for k, v in e2e_gt_pack.items()
-                            }
-                        gnn_d = compute_gnn_e2e_loss(
-                            _e2e_out, pack_on_dev,
-                            int(images.shape[2]), int(images.shape[3]),
-                            int(epoch), self.args,
-                            matched_supervision=gnn_sup,
-                        )
-                        sum_loss = sum_loss + gnn_d["total"]
-                        self._record_gnn_components(gnn_d, tag=TRAIN_TAG if is_train else VAL_TAG)
-                    else:
-                        sum_loss = sum_loss + e2e_aux
-                    if isinstance(_e2e_out.get("soft_nms_stats"), dict):
-                        self._record_soft_nms_stats(
-                            _e2e_out["soft_nms_stats"],
-                            tag=TRAIN_TAG if is_train else VAL_TAG,
-                        )
-                    if isinstance(_e2e_out.get("soft_geom_stats"), dict):
-                        self._record_soft_geom_stats(
-                            _e2e_out["soft_geom_stats"],
-                            tag=TRAIN_TAG if is_train else VAL_TAG,
-                        )
-                    if isinstance(_e2e_out.get("gnn_adj_stats"), dict):
-                        self._record_gnn_adj_stats(
-                            _e2e_out["gnn_adj_stats"],
-                            tag=TRAIN_TAG if is_train else VAL_TAG,
-                        )
-                elif is_center:
-                    # DDP autograd stub: ensure every center-head parameter sees a gradient
-                    # even when GT/warmup isn't available yet.
-                    e2e_aux = (
-                        _e2e_out["center_logits"].sum()
-                        + _e2e_out["polylines_px"].sum()
-                        + _e2e_out["node_feat"].sum()
-                    ) * 0.0
-                    w_center = float(getattr(self.args, "center_loss_weight", 0.0) or 0.0)
-                    # Warmup ramp on center loss weight.
-                    warm_start = int(getattr(self.args, "center_warmup_start_epoch", 0) or 0)
-                    warm_eps = int(getattr(self.args, "center_warmup_epochs", 0) or 0)
-                    if warm_eps > 0 and int(epoch) >= warm_start:
-                        scale = min(1.0, max(0.0, (int(epoch) - warm_start + 1) / float(warm_eps)))
-                    elif warm_eps > 0 and int(epoch) < warm_start:
-                        scale = 0.0
-                    else:
-                        scale = 1.0
-                    w_center_eff = w_center * scale
-                    if e2e_gt_pack is not None and w_center_eff > 0.0:
-                        pack_on_dev = {k: v.to(geom_preds.device, non_blocking=True) for k, v in e2e_gt_pack.items()}
-                        # Build a parameter list view for the DDP zero-stub touch inside the criterion.
-                        head = getattr(self.forward.model, "e2e_head", None)
-                        params_view = list(head.parameters()) if head is not None else None
-                        stride_f = float(
-                            getattr(self.forward.model, "scale", 0.0)
-                            or (int(images.shape[2]) // max(1, int(_e2e_out["center_logits"].shape[2])))
-                        )
-                        center_total, center_d = compute_center_e2e_loss(
-                            _e2e_out, pack_on_dev, self.args,
-                            int(images.shape[2]), int(images.shape[3]),
-                            stride=stride_f, model_params=params_view,
-                        )
-                        sum_loss = sum_loss + w_center_eff * center_total
-                        center_d["center/total"] = float(center_total.detach().item())
-                        center_d["center/weight_eff"] = float(w_center_eff)
-                        self._record_center_components(center_d, tag=TRAIN_TAG if is_train else VAL_TAG)
-                    else:
-                        sum_loss = sum_loss + e2e_aux
+                    sum_loss = sum_loss + gnn_d["total"]
+                    self._record_gnn_components(gnn_d, tag=TRAIN_TAG if is_train else VAL_TAG)
                 else:
-                    # DETR head path (unchanged for legacy detr/seg_detr; also serves
-                    # the exp51 ``hough_detr`` head — it emits ``polylines_px`` /
-                    # ``bezier_curve_px`` / ``objectness_logits`` plus DN extras that
-                    # ``compute_detr_e2e_loss`` consumes when present).
-                    e2e_aux_terms = [
-                        _e2e_out["bezier_curve_px"].sum(),
-                        _e2e_out["objectness_logits"].sum(),
-                    ]
-                    if isinstance(_e2e_out.get("dn_polylines_px", None), torch.Tensor) and _e2e_out["dn_polylines_px"].numel() > 0:
-                        e2e_aux_terms.append(_e2e_out["dn_polylines_px"].sum())
-                    if isinstance(_e2e_out.get("ref_pts_layers", None), torch.Tensor) and _e2e_out["ref_pts_layers"].numel() > 0:
-                        e2e_aux_terms.append(_e2e_out["ref_pts_layers"].sum())
-                    e2e_aux = sum(e2e_aux_terms) * 0.0
-                    w_e2e = float(getattr(self.args, "e2e_loss_weight", 0.0) or 0.0)
-                    if e2e_gt_pack is not None and w_e2e > 0.0:
-                        pack_on_dev = {k: v.to(geom_preds.device, non_blocking=True) for k, v in e2e_gt_pack.items()}
-                        detr_d = compute_detr_e2e_loss(
-                            _e2e_out, pack_on_dev,
-                            int(images.shape[2]), int(images.shape[3]),
-                            int(epoch), self.args,
-                        )
-                        sum_loss = sum_loss + detr_d["total"]
-                        self._record_detr_components(detr_d, tag=TRAIN_TAG if is_train else VAL_TAG)
-                    else:
-                        sum_loss = sum_loss + e2e_aux
+                    sum_loss = sum_loss + e2e_aux
+                if isinstance(_e2e_out.get("soft_nms_stats"), dict):
+                    self._record_soft_nms_stats(
+                        _e2e_out["soft_nms_stats"],
+                        tag=TRAIN_TAG if is_train else VAL_TAG,
+                    )
+                if isinstance(_e2e_out.get("soft_geom_stats"), dict):
+                    self._record_soft_geom_stats(
+                        _e2e_out["soft_geom_stats"],
+                        tag=TRAIN_TAG if is_train else VAL_TAG,
+                    )
+                if isinstance(_e2e_out.get("gnn_adj_stats"), dict):
+                    self._record_gnn_adj_stats(
+                        _e2e_out["gnn_adj_stats"],
+                        tag=TRAIN_TAG if is_train else VAL_TAG,
+                    )
 
-                # Cache the e2e dict per filename for plot_val_summary overlay.
                 if not is_train:
-                    if is_center:
-                        # Move to CPU lazily and slice per-batch for the overlay drawer.
-                        center_cached = {
-                            "center_logits": _e2e_out["center_logits"].detach().cpu(),
-                            "center_peaks_xy": _e2e_out["center_peaks_xy"].detach().cpu(),
-                            "peak_score": _e2e_out["peak_score"].detach().cpu(),
-                            "peak_valid": _e2e_out["peak_valid"].detach().cpu(),
-                            "polylines_px": _e2e_out["polylines_px"].detach().cpu(),
+                    gnn_cached = {
+                        "node_mid_px": _e2e_out["node_mid_px"].detach().cpu(),
+                        "node_end_a_px": _e2e_out["node_end_a_px"].detach().cpu(),
+                        "node_end_b_px": _e2e_out["node_end_b_px"].detach().cpu(),
+                        "node_valid": _e2e_out["node_valid"].detach().cpu(),
+                        "node_conf": _e2e_out["node_conf"].detach().cpu(),
+                        "neighbors": _e2e_out["neighbors"].detach().cpu(),
+                        "neigh_valid": _e2e_out["neigh_valid"].detach().cpu(),
+                        "edge_logits": _e2e_out["edge_logits"].detach().cpu(),
+                    }
+                    if "line_neighbors" in _e2e_out:
+                        gnn_cached["line_neighbors"] = _e2e_out["line_neighbors"].detach().cpu()
+                        gnn_cached["line_neigh_valid"] = _e2e_out["line_neigh_valid"].detach().cpu()
+                    soft_dbg = _e2e_out.get("soft_nms_debug", None)
+                    for bi, fname in enumerate(filenames):
+                        entry = {
+                            "kind": "gnn",
+                            "node_mid_px": gnn_cached["node_mid_px"][bi],
+                            "node_end_a_px": gnn_cached["node_end_a_px"][bi],
+                            "node_end_b_px": gnn_cached["node_end_b_px"][bi],
+                            "node_valid": gnn_cached["node_valid"][bi],
+                            "neighbors": gnn_cached["neighbors"][bi],
+                            "neigh_valid": gnn_cached["neigh_valid"][bi],
+                            "edge_logits": gnn_cached["edge_logits"][bi],
+                            "node_conf": gnn_cached["node_conf"][bi],
                         }
-                        for bi, fname in enumerate(filenames):
-                            self._last_e2e_out_by_file[str(fname)] = {
-                                "kind": "center",
-                                "center_logits": center_cached["center_logits"][bi],
-                                "center_peaks_xy": center_cached["center_peaks_xy"][bi],
-                                "peak_score": center_cached["peak_score"][bi],
-                                "peak_valid": center_cached["peak_valid"][bi],
-                                "polylines_px": center_cached["polylines_px"][bi],
+                        if "line_neighbors" in gnn_cached:
+                            entry["line_neighbors"] = gnn_cached["line_neighbors"][bi]
+                            entry["line_neigh_valid"] = gnn_cached["line_neigh_valid"][bi]
+                        if isinstance(soft_dbg, dict):
+                            entry["soft_nms_debug"] = {
+                                k: (v[bi].detach().cpu() if isinstance(v, torch.Tensor) else v)
+                                for k, v in soft_dbg.items()
                             }
-                    elif is_gnn:
-                        gnn_cached = {
-                            "node_mid_px": _e2e_out["node_mid_px"].detach().cpu(),
-                            "node_end_a_px": _e2e_out["node_end_a_px"].detach().cpu(),
-                            "node_end_b_px": _e2e_out["node_end_b_px"].detach().cpu(),
-                            "node_valid": _e2e_out["node_valid"].detach().cpu(),
-                            "node_conf": _e2e_out["node_conf"].detach().cpu(),
-                            "neighbors": _e2e_out["neighbors"].detach().cpu(),
-                            "neigh_valid": _e2e_out["neigh_valid"].detach().cpu(),
-                            "edge_logits": _e2e_out["edge_logits"].detach().cpu(),
-                        }
-                        if "line_neighbors" in _e2e_out:
-                            gnn_cached["line_neighbors"] = _e2e_out["line_neighbors"].detach().cpu()
-                            gnn_cached["line_neigh_valid"] = _e2e_out["line_neigh_valid"].detach().cpu()
-                        soft_dbg = _e2e_out.get("soft_nms_debug", None)
-                        for bi, fname in enumerate(filenames):
-                            entry = {
-                                "kind": "gnn",
-                                "node_mid_px": gnn_cached["node_mid_px"][bi],
-                                "node_end_a_px": gnn_cached["node_end_a_px"][bi],
-                                "node_end_b_px": gnn_cached["node_end_b_px"][bi],
-                                "node_valid": gnn_cached["node_valid"][bi],
-                                "neighbors": gnn_cached["neighbors"][bi],
-                                "neigh_valid": gnn_cached["neigh_valid"][bi],
-                                "edge_logits": gnn_cached["edge_logits"][bi],
-                                "node_conf": gnn_cached["node_conf"][bi],
-                            }
-                            if "line_neighbors" in gnn_cached:
-                                entry["line_neighbors"] = gnn_cached["line_neighbors"][bi]
-                                entry["line_neigh_valid"] = gnn_cached["line_neigh_valid"][bi]
-                            if isinstance(soft_dbg, dict):
-                                entry["soft_nms_debug"] = {
-                                    k: (v[bi].detach().cpu() if isinstance(v, torch.Tensor) else v)
-                                    for k, v in soft_dbg.items()
-                                }
-                            self._last_e2e_out_by_file[str(fname)] = entry
-                    else:
-                        is_hough = (
-                            isinstance(_e2e_out.get("hough_anchors", None), dict)
-                            and "ref_points_px_init" in _e2e_out
-                        )
-                        if is_hough:
-                            ha = _e2e_out["hough_anchors"]
-                            hough_cached = {
-                                "polylines_px": _e2e_out["polylines_px"].detach().cpu(),
-                                "objectness_logits": _e2e_out["objectness_logits"].detach().cpu(),
-                                "ref_points_px_init": _e2e_out["ref_points_px_init"].detach().cpu(),
-                                "anchors_valid": ha["valid"].detach().cpu(),
-                            }
-                            for bi, fname in enumerate(filenames):
-                                self._last_e2e_out_by_file[str(fname)] = {
-                                    "kind": "hough",
-                                    "polylines_px": hough_cached["polylines_px"][bi],
-                                    "objectness_logits": hough_cached["objectness_logits"][bi],
-                                    "ref_points_px_init": hough_cached["ref_points_px_init"][bi],
-                                    "anchors_valid": hough_cached["anchors_valid"][bi],
-                                }
-                        else:
-                            e2e_cached = {
-                                "bezier_curve_px": _e2e_out["bezier_curve_px"].detach().cpu(),
-                                "objectness_logits": _e2e_out["objectness_logits"].detach().cpu(),
-                            }
-                            for bi, fname in enumerate(filenames):
-                                self._last_e2e_out_by_file[str(fname)] = {
-                                    "kind": "detr",
-                                    "bezier_curve_px": e2e_cached["bezier_curve_px"][bi],
-                                    "objectness_logits": e2e_cached["objectness_logits"][bi],
-                                }
+                        self._last_e2e_out_by_file[str(fname)] = entry
             self._log_loss_diagnostics(losses, mean_losses, sum_loss, filenames, epoch, image_idx_in_batch)
             if is_train:
                 self.backward(sum_loss, epoch=epoch)
@@ -572,38 +442,7 @@ class TrainHandler:
         # sum_loss는 try 블록에서 계산되며, 실패 시 NaN 기본값을 반환합니다.
         return sum_loss.detach().cpu().item(), (geom_preds, embed_preds, _e2e_out)
 
-    def _record_detr_components(self, detr_d, tag):
-        """Append per-batch DETR loss components into the per-epoch accumulator."""
-        buf = self._detr_loss_buf.setdefault(tag, {})
-        for k in (
-            "total", "l1", "endpoint", "obj", "chamfer", "straightness", "dn", "aux_layer",
-            "n_matched", "n_gt", "lam",
-        ):
-            if k not in detr_d:
-                continue
-            v = detr_d[k]
-            if isinstance(v, torch.Tensor):
-                try:
-                    v = float(v.detach().float().cpu().item())
-                except Exception:
-                    continue
-            else:
-                v = float(v)
-            buf.setdefault(k, []).append(v)
 
-    def _flush_detr_components(self, tag, epoch):
-        """Publish mean DETR loss components for the epoch to TB, then reset the buffer."""
-        buf = self._detr_loss_buf.get(tag, {})
-        if not buf:
-            return
-        means = {}
-        for k, vs in buf.items():
-            if not vs:
-                continue
-            means["detr_loss/" + k] = float(np.mean(vs))
-        if means:
-            Log.scalars(tag=tag, dict=means, epoch=epoch)
-        self._detr_loss_buf[tag] = {}
 
     def _record_gnn_components(self, gnn_d, tag):
         """Per-batch GNN loss/metric accumulator (mirrors _record_detr_components)."""
@@ -740,32 +579,7 @@ class TrainHandler:
             Log.scalars(tag=tag, dict=topo, epoch=epoch)
         self._gnn_loss_buf[tag] = {}
 
-    def _record_center_components(self, center_d, tag):
-        """Per-batch Center loss/metric accumulator (mirrors _record_detr_components)."""
-        buf = self._center_loss_buf.setdefault(tag, {})
-        for k, v in center_d.items():
-            if isinstance(v, torch.Tensor):
-                try:
-                    v = float(v.detach().float().cpu().item())
-                except Exception:
-                    continue
-            else:
-                v = float(v)
-            buf.setdefault(k, []).append(v)
 
-    def _flush_center_components(self, tag, epoch):
-        """Publish per-epoch Center means."""
-        buf = self._center_loss_buf.get(tag, {})
-        if not buf:
-            return
-        means = {}
-        for k, vs in buf.items():
-            if not vs:
-                continue
-            means[k] = float(np.mean(vs))
-        if means:
-            Log.scalars(tag=tag, dict=means, epoch=epoch)
-        self._center_loss_buf[tag] = {}
 
     def on_indef(self, epoch, filenames, exception, batch_index, is_train=True):
         if self.best_mean_loss != np.inf or epoch > 10 or is_train:
@@ -852,13 +666,11 @@ class TrainHandler:
         if self.is_time_for_val(epoch):
             scores = self.evaluator.publish_scores(epoch=epoch, tag=TRAIN_TAG)
 
-        # Publish per-component DETR / GNN / Center losses (means over the epoch).
-        self._flush_detr_components(TRAIN_TAG, epoch)
+        # Publish per-component GNN losses (means over the epoch).
         self._flush_gnn_components(TRAIN_TAG, epoch)
         self._flush_gnn_adj_stats(TRAIN_TAG, epoch)
         self._flush_soft_nms_stats(TRAIN_TAG, epoch)
         self._flush_soft_geom_stats(TRAIN_TAG, epoch)
-        self._flush_center_components(TRAIN_TAG, epoch)
 
         # Checkpoint
         save_checkpoint(self.args, self.model, self.optimizer, self.scheduler, epoch, self.args.id)
@@ -997,145 +809,20 @@ class TrainHandler:
 
             # Additional overlay: dispatch by head kind cached in the val pass.
             cached = self._last_e2e_out_by_file.get(str(filenames[idx]), None)
-            if cached is not None:
-                kind = cached.get("kind", "detr") if isinstance(cached, dict) else "detr"
-                if kind == "detr" and "bezier_curve_px" in cached:
-                    self._plot_detr_overlay(
-                        full_basename=filenames[idx], image=images[idx], e2e_single=cached, epoch=epoch
-                    )
-                elif kind == "gnn" and "edge_logits" in cached:
-                    if cached.get("soft_nms_debug") is not None:
-                        self._plot_gnn_soft_nms(
-                            full_basename=filenames[idx], image=images[idx], gnn_single=cached, epoch=epoch
-                        )
-                    self._plot_gnn_edges(
+            if isinstance(cached, dict) and cached.get("edge_logits") is not None:
+                if cached.get("soft_nms_debug") is not None:
+                    self._plot_gnn_soft_nms(
                         full_basename=filenames[idx], image=images[idx], gnn_single=cached, epoch=epoch
                     )
-                elif kind == "center" and "polylines_px" in cached:
-                    self._plot_center_overlay(
-                        full_basename=filenames[idx], image=images[idx], center_single=cached, epoch=epoch
-                    )
-                elif kind == "hough" and "polylines_px" in cached:
-                    self._plot_hough_overlay(
-                        full_basename=filenames[idx], image=images[idx], hough_single=cached, epoch=epoch
-                    )
+                self._plot_gnn_edges(
+                    full_basename=filenames[idx], image=images[idx], gnn_single=cached, epoch=epoch
+                )
 
         # Clear per-batch e2e cache once we've drawn what we needed; the val pass will
         # re-populate it on the next epoch.
         self._last_e2e_out_by_file.clear()
 
-    def _plot_hough_overlay(self, full_basename, image, hough_single, epoch):
-        """Draw exp51 5-pt polylines (cyan, final) + initial Hough 5-pt ref (yellow, dashed)."""
-        viz_image = self._denormalize_for_viz(image)
-        pl = hough_single["polylines_px"]
-        if isinstance(pl, torch.Tensor):
-            pl = pl.detach().cpu().numpy()
-        ref_init = hough_single.get("ref_points_px_init", None)
-        if isinstance(ref_init, torch.Tensor):
-            ref_init = ref_init.detach().cpu().numpy()
-        obj_t = hough_single.get("objectness_logits", None)
-        obj_prob = None
-        if obj_t is not None:
-            if isinstance(obj_t, torch.Tensor):
-                obj_t = obj_t.detach().cpu().float()
-            else:
-                obj_t = torch.tensor(obj_t, dtype=torch.float32)
-            obj_prob = torch.sigmoid(obj_t).numpy()
-        valid_anchors = hough_single.get("anchors_valid", None)
-        if isinstance(valid_anchors, torch.Tensor):
-            valid_anchors = valid_anchors.detach().cpu().numpy().astype(bool)
-        ov_thresh = float(getattr(self.args, "e2e_overlay_objectness_thresh", 0.35) or 0.0)
 
-        # --- final polylines (cyan) ---
-        valid_curves = []
-        for q in range(pl.shape[0]):
-            if obj_prob is not None and ov_thresh > 0.0 and float(obj_prob[q]) < ov_thresh:
-                continue
-            if valid_anchors is not None and not bool(valid_anchors[q]):
-                # Slot had no Hough cluster → skip to keep the overlay focused on real preds.
-                continue
-            pts = pl[q]
-            if np.all(pts == 0) or np.any(np.isnan(pts)):
-                continue
-            valid_curves.append(pts)
-        if valid_curves:
-            img_path = self.args.paths.generate_debug_image_file_path(
-                full_basename, ImageIdx.PRED, suffix="hough_e2e_" + VAL_TAG
-            )
-            plot(
-                [valid_curves], name=img_path,
-                image=viz_image.clone() if isinstance(viz_image, torch.Tensor) else viz_image,
-                coords=self.dataset.coords, show_grid=False, cell_size=None,
-                threshold=0.0, coordinates=CoordinateSystem.UV_CONTINUOUS,
-                colorstyle=ColorStyle.UNIFORM, color=(0, 255, 255), thickness=2,
-                tag=VAL_TAG + "/hough_e2e", epoch=epoch, imageidx=ImageIdx.PRED,
-                anchors=self.dataset.anchors,
-            )
-
-        # --- initial Hough 5-pt refs (yellow) ---
-        if ref_init is not None:
-            init_curves = []
-            for q in range(ref_init.shape[0]):
-                if valid_anchors is not None and not bool(valid_anchors[q]):
-                    continue
-                pts = ref_init[q]
-                if np.all(pts == 0) or np.any(np.isnan(pts)):
-                    continue
-                init_curves.append(pts)
-            if init_curves:
-                img_path = self.args.paths.generate_debug_image_file_path(
-                    full_basename, ImageIdx.PRED, suffix="hough_anchor_" + VAL_TAG
-                )
-                plot(
-                    [init_curves], name=img_path,
-                    image=viz_image.clone() if isinstance(viz_image, torch.Tensor) else viz_image,
-                    coords=self.dataset.coords, show_grid=False, cell_size=None,
-                    threshold=0.0, coordinates=CoordinateSystem.UV_CONTINUOUS,
-                    colorstyle=ColorStyle.UNIFORM, color=(0, 220, 255), thickness=1,
-                    tag=VAL_TAG + "/hough_anchor", epoch=epoch, imageidx=ImageIdx.PRED,
-                    anchors=self.dataset.anchors,
-                )
-
-    def _plot_detr_overlay(self, full_basename, image, e2e_single, epoch):
-        """Draw Bézier curves (cyan) for queries passing objectness + sanity checks."""
-        viz_image = self._denormalize_for_viz(image)
-        # bezier_curve_px is [K, T, 2] in pixel (x, y); plot() expects a "batch of
-        # instances" so wrap in another list at axis 0.
-        cr = e2e_single["bezier_curve_px"]
-        if isinstance(cr, torch.Tensor):
-            cr = cr.detach().cpu().numpy()
-        obj_t = e2e_single.get("objectness_logits", None)
-        obj_prob = None
-        if obj_t is not None:
-            if isinstance(obj_t, torch.Tensor):
-                obj_t = obj_t.detach().cpu().float()
-            else:
-                obj_t = torch.tensor(obj_t, dtype=torch.float32)
-            obj_prob = torch.sigmoid(obj_t).numpy()
-        ov_thresh = float(getattr(self.args, "e2e_overlay_objectness_thresh", 0.35) or 0.0)
-        # Filter out queries with all-zero / NaN curves (defensive).
-        valid_curves = []
-        for q in range(cr.shape[0]):
-            if obj_prob is not None and ov_thresh > 0.0 and float(obj_prob[q]) < ov_thresh:
-                continue
-            pts = cr[q]
-            if np.all(pts == 0) or np.any(np.isnan(pts)):
-                continue
-            valid_curves.append(pts)
-        if not valid_curves:
-            return
-        e2e_lines = [valid_curves]  # [[K_valid, T, 2]] -> plot() iterates [b][i]
-        img_path = self.args.paths.generate_debug_image_file_path(
-            full_basename, ImageIdx.PRED, suffix="detr_e2e_" + VAL_TAG
-        )
-        plot(
-            e2e_lines, name=img_path, image=viz_image.clone() if isinstance(viz_image, torch.Tensor) else viz_image,
-            coords=self.dataset.coords, show_grid=False, cell_size=None,
-            threshold=0.0, coordinates=CoordinateSystem.UV_CONTINUOUS,
-            colorstyle=ColorStyle.UNIFORM, color=(0, 255, 255), thickness=2,
-            tag=VAL_TAG + "/detr_e2e", epoch=epoch, imageidx=ImageIdx.PRED,
-            anchors=self.dataset.anchors,
-        )
 
     def _plot_gnn_soft_nms(self, full_basename, image, gnn_single, epoch):
         """TensorBoard: before/after soft-NMS segment overlays (conf as alpha)."""
@@ -1409,136 +1096,15 @@ class TrainHandler:
             level=1,
         )
 
-    def _plot_center_overlay(self, full_basename, image, center_single, epoch):
-        """TensorBoard val overlay for center-DETR head.
-
-        Renders three layers on a denormalised RGB canvas:
-          1. Optional translucent center heatmap (sigmoid logits, upsampled). Colormap
-             and alpha come from ``--center_tb_heatmap_colormap`` / ``--center_tb_heatmap_alpha``
-             (default HOT + low alpha to avoid Jet's blue cast).
-          2. The K predicted peak markers (◆) coloured per peak with score legend.
-          3. The K predicted N-point polylines drawn in the same colour, gated by an
-             effective score threshold ``min(center_tb_peak_thresh, center_peak_thresh)``
-             (unless ``center_tb_peak_thresh <= 0`` to disable the TB score gate).
-        """
-        import colorsys
-        import cv2
-
-        polylines_px = center_single["polylines_px"]      # [K, N, 2]
-        peaks_xy = center_single["center_peaks_xy"]       # [K, 2]
-        peak_score = center_single["peak_score"]          # [K]
-        peak_valid = center_single.get("peak_valid", None)
-        center_logits = center_single.get("center_logits", None)
-
-        if isinstance(polylines_px, torch.Tensor):
-            polylines_px = polylines_px.detach().cpu().numpy()
-        if isinstance(peaks_xy, torch.Tensor):
-            peaks_xy = peaks_xy.detach().cpu().numpy()
-        if isinstance(peak_score, torch.Tensor):
-            peak_score = peak_score.detach().cpu().float().numpy()
-        if peak_valid is not None and isinstance(peak_valid, torch.Tensor):
-            peak_valid = peak_valid.detach().cpu().numpy().astype(bool)
-        if center_logits is not None and isinstance(center_logits, torch.Tensor):
-            center_logits = center_logits.detach().cpu().float().numpy()
-
-        thr_tb = float(getattr(self.args, "center_tb_peak_thresh", 0.3) or 0.0)
-        thr_pk = float(getattr(self.args, "center_peak_thresh", 0.05) or 0.0)
-        # TB overlay: never stricter than peak extraction (unless user disables TB gate with <=0).
-        if thr_tb <= 0.0:
-            thr = 0.0
-        elif thr_pk <= 0.0:
-            thr = thr_tb
-        else:
-            thr = min(thr_tb, thr_pk)
-        thickness = max(1, int(getattr(self.args, "center_tb_thickness", 3)))
-        show_heat = bool(getattr(self.args, "center_tb_show_heatmap", True))
-        heat_alpha = float(getattr(self.args, "center_tb_heatmap_alpha", 0.12) or 0.0)
-        heat_alpha = max(0.0, min(1.0, heat_alpha))
-        cmap_name = str(getattr(self.args, "center_tb_heatmap_colormap", "hot") or "hot").upper()
-        cmap_id = getattr(cv2, "COLORMAP_" + cmap_name, cv2.COLORMAP_HOT)
-
-        viz = self._denormalize_for_viz(image)
-        if isinstance(viz, torch.Tensor):
-            chw = viz.detach().cpu().float().numpy()
-        else:
-            chw = np.asarray(viz, dtype=np.float32)
-        if chw.ndim != 3 or chw.shape[0] > 3:
-            return
-        hwc_rgb = np.transpose(np.clip(chw, 0.0, 1.0), (1, 2, 0))
-        hwc_rgb = (hwc_rgb * 255.0).round().astype(np.uint8)
-        canvas_bgr = cv2.cvtColor(hwc_rgb, cv2.COLOR_RGB2BGR)
-        H_img, W_img = canvas_bgr.shape[:2]
-
-        if show_heat and heat_alpha > 0.0 and center_logits is not None and center_logits.ndim == 3 and center_logits.shape[0] == 1:
-            heat = 1.0 / (1.0 + np.exp(-center_logits[0]))
-            heat = np.clip(heat, 0.0, 1.0)
-            heat = (heat * 255.0).astype(np.uint8)
-            heat_up = cv2.resize(heat, (W_img, H_img), interpolation=cv2.INTER_LINEAR)
-            heat_col = cv2.applyColorMap(heat_up, cmap_id)
-            canvas_bgr = cv2.addWeighted(canvas_bgr, 1.0 - heat_alpha, heat_col, heat_alpha, 0.0)
-
-        K = int(polylines_px.shape[0])
-        golden = 0.618033988749895
-        kept = 0
-        for q in range(K):
-            score_q = float(peak_score[q]) if q < len(peak_score) else 0.0
-            if peak_valid is not None and q < len(peak_valid) and not bool(peak_valid[q]):
-                continue
-            if score_q < thr:
-                continue
-            h = (q * golden) % 1.0
-            r_rgb, g_rgb, b_rgb = colorsys.hsv_to_rgb(h, 0.88, 0.96)
-            col = (int(255 * b_rgb), int(255 * g_rgb), int(255 * r_rgb))
-            pts = polylines_px[q]
-            if pts.shape[0] < 2:
-                continue
-            pts_int = np.round(pts).astype(np.int32)
-            cv2.polylines(canvas_bgr, [pts_int], isClosed=False, color=col, thickness=thickness, lineType=cv2.LINE_AA)
-            for j in range(pts_int.shape[0]):
-                cv2.circle(canvas_bgr, (int(pts_int[j, 0]), int(pts_int[j, 1])), 3, col, -1, lineType=cv2.LINE_AA)
-            if q < peaks_xy.shape[0]:
-                px, py = float(peaks_xy[q, 0]), float(peaks_xy[q, 1])
-                cv2.drawMarker(
-                    canvas_bgr, (int(round(px)), int(round(py))), col,
-                    markerType=cv2.MARKER_DIAMOND, markerSize=14, thickness=2,
-                )
-            kept += 1
-
-        legend = "center K=%d/%d thr_eff=%.2f" % (kept, K, thr)
-        cv2.rectangle(canvas_bgr, (4, 4), (4 + 420, 4 + 26), (255, 255, 255), thickness=-1)
-        cv2.putText(
-            canvas_bgr, legend, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (20, 20, 20), 1, cv2.LINE_AA,
-        )
-
-        img_path = self.args.paths.generate_debug_image_file_path(
-            full_basename, ImageIdx.PRED, suffix="center_e2e_" + VAL_TAG
-        )
-        if not os.path.exists(os.path.dirname(img_path)):
-            os.makedirs(os.path.dirname(img_path))
-        cv2.imwrite(img_path, canvas_bgr)
-        Log.info(
-            "Export Center overlay (K_kept=%d) to file://%s" % (kept, os.path.abspath(img_path)),
-            level=2,
-        )
-        Log.img(
-            img_path,
-            canvas_bgr[..., ::-1],
-            epoch,
-            tag=VAL_TAG + "/center_e2e",
-            imageidx=ImageIdx.PRED,
-            level=1,
-        )
 
     def on_val_epoch_finished(self, epoch):
         self.losses[VAL_TAG].log(epoch=epoch, tag=VAL_TAG)
 
         # Publish per-component DETR / GNN / Center losses for the val pass.
-        self._flush_detr_components(VAL_TAG, epoch)
         self._flush_gnn_components(VAL_TAG, epoch)
         self._flush_gnn_adj_stats(VAL_TAG, epoch)
         self._flush_soft_nms_stats(VAL_TAG, epoch)
         self._flush_soft_geom_stats(VAL_TAG, epoch)
-        self._flush_center_components(VAL_TAG, epoch)
 
         new_best_mean_loss = self.losses[VAL_TAG].mean(epoch)
         gradient_loss = self.losses[VAL_TAG].backprop(epoch)

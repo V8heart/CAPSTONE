@@ -26,9 +26,7 @@ import torch.nn.functional as F
 
 from yolino.model.activations import get_activations
 from yolino.model.yolino_std_dcn_head import StdFeatRefineDcn, YolinoStdHead
-from yolino.model.yolino_detr_head import YolinoDetrBezierHead
 from yolino.model.yolino_gnn_head import YolinoGnnSegmentGraphHead
-from yolino.model.yolino_center_head import YolinoCenterPolyHead
 from yolino.utils.enums import Variables
 from yolino.utils.logger import Log
 
@@ -759,22 +757,11 @@ class YolinoNet(nn.Module):
             )
             head_feat_channels = in_channels
 
-        # ----- Optional E2E head (yaml: e2e_differentiable_postproc) -----
-        # The flag now selects the YOLinO-DETR Hybrid Bézier head; the legacy
-        # E2EDifferentiablePostHead remains in-tree but is no longer wired here.
+        # ----- Optional GNN E2E head (yaml: e2e_differentiable_postproc) -----
         self.e2e_differentiable_postproc = bool(getattr(args, "e2e_differentiable_postproc", False))
-        self.e2e_mode = str(getattr(args, "e2e_mode", "detr")).lower()
-        if self.e2e_mode not in (
-            "detr", "gnn", "center", "seg_detr", "seg_detr_soft", "std_seg_detr",
-            "hough_detr", "learnable_detr",
-        ):
-            raise ValueError(
-                "Unknown --e2e_mode=%r (expected 'detr', 'seg_detr', 'seg_detr_soft', "
-                "'std_seg_detr', 'gnn', 'center', 'hough_detr' or 'learnable_detr')"
-                % self.e2e_mode
-            )
-        if self.e2e_mode == "std_seg_detr" and not self.use_std:
-            raise ValueError("--e2e_mode=std_seg_detr requires --std true")
+        self.e2e_mode = str(getattr(args, "e2e_mode", "gnn")).lower()
+        if self.e2e_mode != "gnn":
+            raise ValueError("Unknown --e2e_mode=%r (only 'gnn' is supported)" % self.e2e_mode)
         self.e2e_head = None
         self._e2e_geom_activations = None
         self._e2e_conf_idx = -1
@@ -786,340 +773,91 @@ class YolinoNet(nn.Module):
                     % (list(conf_pos),)
                 )
             self._e2e_conf_idx = int(conf_pos[0])
-            if self.e2e_mode == "detr":
-                self.e2e_head = YolinoDetrBezierHead(
-                    line_rep=coords.line_representation.enum,
-                    fpn_channels=head_feat_channels,
-                    num_queries=int(getattr(args, "e2e_num_queries", 20)),
-                    decoder_layers=int(getattr(args, "e2e_decoder_layers", 3)),
-                    decoder_heads=int(getattr(args, "e2e_decoder_heads", 8)),
-                    decoder_ff=int(getattr(args, "e2e_decoder_ff", 1024)),
-                    token_dim=int(getattr(args, "e2e_token_dim", 256)),
-                    bezier_degree=int(getattr(args, "e2e_bezier_degree", 3)),
-                    bezier_num_samples=int(getattr(args, "e2e_bezier_num_samples", 32)),
-                    conf_filter_thresh=float(getattr(args, "e2e_conf_filter_thresh", 0.1)),
-                    local_max_filter=bool(getattr(args, "e2e_local_max_filter", False)),
-                    local_max_kernel=int(getattr(args, "e2e_local_max_kernel", 5)),
-                    anchor_ctrl_offsets=bool(getattr(args, "e2e_bezier_anchor_ctrl_offsets", True)),
+            _gnn_token_dim = getattr(args, "gnn_token_dim", None)
+            _gnn_token_dim = int(_gnn_token_dim if _gnn_token_dim is not None else 256)
+            self.e2e_head = YolinoGnnSegmentGraphHead(
+                line_rep=coords.line_representation.enum,
+                fpn_channels=head_feat_channels,
+                token_dim=_gnn_token_dim,
+                max_nodes=int(getattr(args, "gnn_max_nodes", 256)),
+                node_conf_thresh=float(getattr(args, "gnn_node_conf_thresh", 0.1)),
+                knn_k=int(getattr(args, "gnn_knn_k", 16)),
+                knn_min_dir_dot=float(getattr(args, "gnn_knn_min_dir_dot", 0.0)),
+                edge_radius_px=float(getattr(args, "gnn_edge_radius_px", 0.0)),
+                adjacency_mode=str(getattr(args, "gnn_adjacency_mode", "global")),
+                max_lateral_px=float(getattr(args, "gnn_max_lateral_px", 48.0)),
+                max_lateral_sym=bool(getattr(args, "gnn_max_lateral_sym", False)),
+                lateral_on_overlap_only=bool(getattr(args, "gnn_lateral_on_overlap_only", False)),
+                lateral_overlap_window_px=float(getattr(args, "gnn_lateral_overlap_window_px", 24.0)),
+                max_along_px=float(getattr(args, "gnn_max_along_px", 0.0)),
+                max_end_gap_px=float(getattr(args, "gnn_max_end_gap_px", 0.0)),
+                min_dir_dot=float(getattr(args, "gnn_min_dir_dot", 0.0)),
+                directional_min_sep_px=float(getattr(args, "gnn_directional_min_sep_px", 8.0)),
+                directional_k=int(getattr(args, "gnn_directional_k", 2)),
+                directional_include_all=bool(getattr(args, "gnn_directional_include_all", False)),
+                context_k=int(getattr(args, "gnn_context_k", 4)),
+                context_lat_min_px=float(getattr(args, "gnn_context_lat_min_px", 12.0)),
+                context_lat_max_px=float(getattr(args, "gnn_context_lat_max_px", 40.0)),
+                context_max_along_px=float(getattr(args, "gnn_context_max_along_px", 200.0)),
+                context_min_dir_dot=float(getattr(args, "gnn_context_min_dir_dot", 0.85)),
+                gat_layers=int(getattr(args, "gnn_gat_layers", 3)),
+                heads=int(getattr(args, "gnn_heads", 4)),
+                dropout=float(getattr(args, "gnn_dropout", 0.1)),
+                soft_nms_enabled=bool(getattr(args, "gnn_soft_nms", False)),
+                soft_nms_mid_sigma_px=float(getattr(args, "gnn_soft_nms_mid_sigma_px", 16.0)),
+                soft_nms_min_dir_dot=float(getattr(args, "gnn_soft_nms_min_dir_dot", 0.96)),
+                soft_nms_decay_method=str(getattr(args, "gnn_soft_nms_decay", "linear")),
+                soft_nms_score_floor=float(getattr(args, "gnn_soft_nms_score_floor", 0.001)),
+                soft_nms_prefilter_conf=float(getattr(args, "gnn_soft_nms_prefilter_conf", 0.05)),
+                soft_nms_max_segments=int(getattr(args, "gnn_soft_nms_max_segments", 1024)),
+                segment_merge_enabled=bool(getattr(args, "gnn_segment_merge", False)),
+                segment_merge_lat_px=float(getattr(args, "gnn_segment_merge_lat_px", 6.0)),
+                segment_merge_dir_dot_min=float(getattr(args, "gnn_segment_merge_dir_dot_min", 0.98)),
+                segment_merge_end_gap_px=float(getattr(args, "gnn_segment_merge_end_gap_px", 8.0)),
+                segment_merge_iters=int(getattr(args, "gnn_segment_merge_iters", 3)),
+                segment_merge_prefilter_conf=float(getattr(args, "gnn_segment_merge_prefilter_conf", 0.05)),
+                use_hard_geom_gate=bool(getattr(args, "gnn_use_hard_geom_gate", True)),
+                soft_geom_gate_enabled=bool(getattr(args, "gnn_soft_geom_gate", False)),
+                soft_geom_sigma_lat_px=float(getattr(args, "gnn_soft_geom_sigma_lat_px", 32.0)),
+                soft_geom_dir_floor=float(getattr(args, "gnn_soft_geom_dir_floor", 0.5)),
+                soft_geom_prior_eps=float(getattr(args, "gnn_soft_geom_prior_eps", 1e-6)),
+                node_use_visual_feat=bool(getattr(args, "gnn_node_use_visual_feat", True)),
+                edge_feat_signed=bool(getattr(args, "gnn_edge_feat_signed", False)),
+                gat_geom_bias=bool(getattr(args, "gnn_gat_geom_bias", False)),
+                gat_geom_bias_w_along=float(getattr(args, "gnn_gat_geom_bias_w_along", 1.0)),
+                gat_geom_bias_w_lat=float(getattr(args, "gnn_gat_geom_bias_w_lat", 0.5)),
+                gat_geom_bias_tau_along=float(getattr(args, "gnn_gat_geom_bias_tau_along", 40.0)),
+                gat_geom_bias_tau_lat=float(getattr(args, "gnn_gat_geom_bias_tau_lat", 20.0)),
+            )
+            _adj = str(getattr(args, "gnn_adjacency_mode", "global")).lower()
+            if _adj == "global":
+                _k_eff = int(self.e2e_head.max_nodes)
+            elif _adj == "directional2":
+                _k_eff = int(getattr(args, "gnn_directional_k", 2))
+            elif _adj == "directional2_ctx":
+                _k_eff = -1 if bool(getattr(args, "gnn_directional_include_all", False)) else (
+                    int(getattr(args, "gnn_directional_k", 2)) + int(getattr(args, "gnn_context_k", 4))
                 )
-                Log.info(
-                    "YolinoDetrBezierHead enabled (K=%d, decoder_layers=%d, token_dim=%d, conf_idx=%d, "
-                    "local_max=%s/k=%d, anchor_ctrl_offsets=%s)"
-                    % (
-                        self.e2e_head.num_queries,
-                        int(getattr(args, "e2e_decoder_layers", 3)),
-                        self.e2e_head.token_dim,
-                        self._e2e_conf_idx,
-                        str(self.e2e_head.local_max_filter),
-                        int(self.e2e_head.local_max_kernel),
-                        str(self.e2e_head.anchor_ctrl_offsets),
-                    )
+            elif _adj == "directional2_global":
+                _k_eff = int(getattr(args, "gnn_knn_k", 16))
+            else:
+                _k_eff = int(getattr(args, "gnn_knn_k", 16))
+            Log.info(
+                "YolinoGnnSegmentGraphHead enabled (adjacency=%s, N_max=%d, K=%d, layers=%d, heads=%d, "
+                "token_dim=%d, conf_thresh=%.3f, conf_idx=%d)"
+                % (
+                    str(getattr(args, "gnn_adjacency_mode", "global")),
+                    self.e2e_head.max_nodes,
+                    _k_eff,
+                    len(self.e2e_head.gat_layers),
+                    int(getattr(args, "gnn_heads", 4)),
+                    self.e2e_head.token_dim,
+                    self.e2e_head.node_conf_thresh,
+                    self._e2e_conf_idx,
                 )
-            elif self.e2e_mode == "seg_detr":
-                from yolino.model.yolino_seg_detr_head import YolinoSegDetrBezierHead
-
-                self.e2e_head = YolinoSegDetrBezierHead(
-                    line_rep=coords.line_representation.enum,
-                    fpn_channels=head_feat_channels,
-                    num_queries=int(getattr(args, "e2e_num_queries", 20)),
-                    decoder_layers=int(getattr(args, "e2e_decoder_layers", 3)),
-                    decoder_heads=int(getattr(args, "e2e_decoder_heads", 8)),
-                    decoder_ff=int(getattr(args, "e2e_decoder_ff", 1024)),
-                    token_dim=int(getattr(args, "e2e_token_dim", 256)),
-                    bezier_degree=int(getattr(args, "e2e_bezier_degree", 3)),
-                    bezier_num_samples=int(getattr(args, "e2e_bezier_num_samples", 32)),
-                    conf_filter_thresh=float(getattr(args, "e2e_conf_filter_thresh", 0.1)),
-                    dropout=float(getattr(args, "gnn_dropout", 0.1)),
-                )
-                Log.info(
-                    "YolinoSegDetrBezierHead enabled (K=%d, learned queries, segment-token memory only; "
-                    "no center heatmap / no Top-K anchor init, conf_idx=%d)"
-                    % (self.e2e_head.num_queries, self._e2e_conf_idx)
-                )
-            elif self.e2e_mode == "seg_detr_soft":
-                from yolino.model.yolino_seg_detr_head import YolinoSegDetrSoftInitBezierHead
-
-                soft_mode = str(getattr(args, "e2e_soft_query_init", "residual_topk")).lower()
-                self.e2e_head = YolinoSegDetrSoftInitBezierHead(
-                    line_rep=coords.line_representation.enum,
-                    fpn_channels=head_feat_channels,
-                    num_queries=int(getattr(args, "e2e_num_queries", 20)),
-                    decoder_layers=int(getattr(args, "e2e_decoder_layers", 3)),
-                    decoder_heads=int(getattr(args, "e2e_decoder_heads", 8)),
-                    decoder_ff=int(getattr(args, "e2e_decoder_ff", 1024)),
-                    token_dim=int(getattr(args, "e2e_token_dim", 256)),
-                    bezier_degree=int(getattr(args, "e2e_bezier_degree", 3)),
-                    bezier_num_samples=int(getattr(args, "e2e_bezier_num_samples", 32)),
-                    conf_filter_thresh=float(getattr(args, "e2e_conf_filter_thresh", 0.1)),
-                    dropout=float(getattr(args, "gnn_dropout", 0.1)),
-                    soft_init_mode=soft_mode,
-                    local_max_filter=bool(getattr(args, "e2e_local_max_filter", False)),
-                    local_max_kernel=int(getattr(args, "e2e_local_max_kernel", 5)),
-                    softmax_pool_temperature=float(
-                        getattr(args, "e2e_softmax_pool_temperature", 1.0)
-                    ),
-                )
-                Log.info(
-                    "YolinoSegDetrSoftInitBezierHead enabled (K=%d, soft_init=%s, segment memory; "
-                    "no center heatmap, conf_idx=%d, local_max=%s)"
-                    % (
-                        self.e2e_head.num_queries,
-                        self.e2e_head.soft_init_mode,
-                        self._e2e_conf_idx,
-                        str(self.e2e_head.local_max_filter),
-                    )
-                )
-            elif self.e2e_mode == "std_seg_detr":
-                from yolino.model.yolino_seg_detr_head import YolinoGridSegDetrBezierHead
-
-                self.e2e_head = YolinoGridSegDetrBezierHead(
-                    line_rep=coords.line_representation.enum,
-                    fpn_channels=head_feat_channels,
-                    num_predictors=self.num_predictors,
-                    num_queries=int(getattr(args, "e2e_num_queries", 20)),
-                    decoder_layers=int(getattr(args, "e2e_decoder_layers", 3)),
-                    decoder_heads=int(getattr(args, "e2e_decoder_heads", 8)),
-                    decoder_ff=int(getattr(args, "e2e_decoder_ff", 1024)),
-                    token_dim=int(getattr(args, "e2e_token_dim", 256)),
-                    bezier_degree=int(getattr(args, "e2e_bezier_degree", 3)),
-                    bezier_num_samples=int(getattr(args, "e2e_bezier_num_samples", 32)),
-                    polyline_num_points=int(getattr(args, "e2e_polyline_num_points", 0)),
-                    conf_filter_thresh=float(getattr(args, "e2e_conf_filter_thresh", 0.1)),
-                    dropout=float(getattr(args, "gnn_dropout", 0.1)),
-                )
-                Log.info(
-                    "YolinoGridSegDetrBezierHead enabled (STD feat%s, skip_geom=%s, K=%d, "
-                    "grid tokens x P=%d, output=%s)"
-                    % (
-                        "+FeatDCN" if self.std_feat_dcn is not None else "",
-                        str(self.std_skip_geom_head),
-                        self.e2e_head.num_queries,
-                        self.num_predictors,
-                        self.e2e_head.output_mode,
-                    )
-                )
-            elif self.e2e_mode == "gnn":
-                _gnn_token_dim = getattr(args, "gnn_token_dim", None)
-                _gnn_token_dim = int(
-                    _gnn_token_dim if _gnn_token_dim is not None
-                    else getattr(args, "e2e_token_dim", 256)
-                )
-                self.e2e_head = YolinoGnnSegmentGraphHead(
-                    line_rep=coords.line_representation.enum,
-                    fpn_channels=head_feat_channels,
-                    token_dim=_gnn_token_dim,
-                    max_nodes=int(getattr(args, "gnn_max_nodes", 256)),
-                    node_conf_thresh=float(getattr(args, "gnn_node_conf_thresh", 0.1)),
-                    knn_k=int(getattr(args, "gnn_knn_k", 16)),
-                    knn_min_dir_dot=float(getattr(args, "gnn_knn_min_dir_dot", 0.0)),
-                    edge_radius_px=float(getattr(args, "gnn_edge_radius_px", 0.0)),
-                    adjacency_mode=str(getattr(args, "gnn_adjacency_mode", "global")),
-                    max_lateral_px=float(getattr(args, "gnn_max_lateral_px", 48.0)),
-                    max_lateral_sym=bool(getattr(args, "gnn_max_lateral_sym", False)),
-                    lateral_on_overlap_only=bool(getattr(args, "gnn_lateral_on_overlap_only", False)),
-                    lateral_overlap_window_px=float(getattr(args, "gnn_lateral_overlap_window_px", 24.0)),
-                    max_along_px=float(getattr(args, "gnn_max_along_px", 0.0)),
-                    max_end_gap_px=float(getattr(args, "gnn_max_end_gap_px", 0.0)),
-                    min_dir_dot=float(getattr(args, "gnn_min_dir_dot", 0.0)),
-                    directional_min_sep_px=float(getattr(args, "gnn_directional_min_sep_px", 8.0)),
-                    directional_k=int(getattr(args, "gnn_directional_k", 2)),
-                    directional_include_all=bool(getattr(args, "gnn_directional_include_all", False)),
-                    context_k=int(getattr(args, "gnn_context_k", 4)),
-                    context_lat_min_px=float(getattr(args, "gnn_context_lat_min_px", 12.0)),
-                    context_lat_max_px=float(getattr(args, "gnn_context_lat_max_px", 40.0)),
-                    context_max_along_px=float(getattr(args, "gnn_context_max_along_px", 200.0)),
-                    context_min_dir_dot=float(getattr(args, "gnn_context_min_dir_dot", 0.85)),
-                    gat_layers=int(getattr(args, "gnn_gat_layers", 3)),
-                    heads=int(getattr(args, "gnn_heads", 4)),
-                    dropout=float(getattr(args, "gnn_dropout", 0.1)),
-                    soft_nms_enabled=bool(getattr(args, "gnn_soft_nms", False)),
-                    soft_nms_mid_sigma_px=float(getattr(args, "gnn_soft_nms_mid_sigma_px", 16.0)),
-                    soft_nms_min_dir_dot=float(getattr(args, "gnn_soft_nms_min_dir_dot", 0.96)),
-                    soft_nms_decay_method=str(getattr(args, "gnn_soft_nms_decay", "linear")),
-                    soft_nms_score_floor=float(getattr(args, "gnn_soft_nms_score_floor", 0.001)),
-                    soft_nms_prefilter_conf=float(getattr(args, "gnn_soft_nms_prefilter_conf", 0.05)),
-                    soft_nms_max_segments=int(getattr(args, "gnn_soft_nms_max_segments", 1024)),
-                    segment_merge_enabled=bool(getattr(args, "gnn_segment_merge", False)),
-                    segment_merge_lat_px=float(getattr(args, "gnn_segment_merge_lat_px", 6.0)),
-                    segment_merge_dir_dot_min=float(getattr(args, "gnn_segment_merge_dir_dot_min", 0.98)),
-                    segment_merge_end_gap_px=float(getattr(args, "gnn_segment_merge_end_gap_px", 8.0)),
-                    segment_merge_iters=int(getattr(args, "gnn_segment_merge_iters", 3)),
-                    segment_merge_prefilter_conf=float(getattr(args, "gnn_segment_merge_prefilter_conf", 0.05)),
-                    use_hard_geom_gate=bool(getattr(args, "gnn_use_hard_geom_gate", True)),
-                    soft_geom_gate_enabled=bool(getattr(args, "gnn_soft_geom_gate", False)),
-                    soft_geom_sigma_lat_px=float(getattr(args, "gnn_soft_geom_sigma_lat_px", 32.0)),
-                    soft_geom_dir_floor=float(getattr(args, "gnn_soft_geom_dir_floor", 0.5)),
-                    soft_geom_prior_eps=float(getattr(args, "gnn_soft_geom_prior_eps", 1e-6)),
-                    node_use_visual_feat=bool(getattr(args, "gnn_node_use_visual_feat", True)),
-                    edge_feat_signed=bool(getattr(args, "gnn_edge_feat_signed", False)),
-                    gat_geom_bias=bool(getattr(args, "gnn_gat_geom_bias", False)),
-                    gat_geom_bias_w_along=float(getattr(args, "gnn_gat_geom_bias_w_along", 1.0)),
-                    gat_geom_bias_w_lat=float(getattr(args, "gnn_gat_geom_bias_w_lat", 0.5)),
-                    gat_geom_bias_tau_along=float(getattr(args, "gnn_gat_geom_bias_tau_along", 40.0)),
-                    gat_geom_bias_tau_lat=float(getattr(args, "gnn_gat_geom_bias_tau_lat", 20.0)),
-                )
-                _adj = str(getattr(args, "gnn_adjacency_mode", "global")).lower()
-                if _adj == "global":
-                    _k_eff = int(self.e2e_head.max_nodes)
-                elif _adj == "directional2":
-                    _k_eff = int(getattr(args, "gnn_directional_k", 2))
-                elif _adj == "directional2_ctx":
-                    if bool(getattr(args, "gnn_directional_include_all", False)):
-                        _k_eff = -1  # variable (batch max on-line + context_k)
-                    else:
-                        _k_eff = int(getattr(args, "gnn_directional_k", 2)) + int(
-                            getattr(args, "gnn_context_k", 4)
-                        )
-                elif _adj == "directional2_global":
-                    _k_eff = int(getattr(args, "gnn_knn_k", 16))
-                else:
-                    _k_eff = int(getattr(args, "gnn_knn_k", 16))
-                Log.info(
-                    "YolinoGnnSegmentGraphHead enabled (adjacency=%s, N_max=%d, K=%d, layers=%d, heads=%d, "
-                    "token_dim=%d, conf_thresh=%.3f, radius_px=%.1f, lat_px=%.1f sym=%s along_px=%.1f "
-                    "end_px=%.1f min_dir_dot=%.2f, soft_nms=%s, hard_geom=%s soft_geom=%s, conf_idx=%d)"
-                    % (
-                        str(getattr(args, "gnn_adjacency_mode", "global")),
-                        self.e2e_head.max_nodes,
-                        _k_eff,
-                        len(self.e2e_head.gat_layers),
-                        int(getattr(args, "gnn_heads", 4)),
-                        self.e2e_head.token_dim,
-                        self.e2e_head.node_conf_thresh,
-                        self.e2e_head.edge_radius_px,
-                        float(getattr(args, "gnn_max_lateral_px", 48.0)),
-                        bool(getattr(args, "gnn_max_lateral_sym", False)),
-                        float(getattr(args, "gnn_max_along_px", 0.0)),
-                        float(getattr(args, "gnn_max_end_gap_px", 0.0)),
-                        float(getattr(args, "gnn_min_dir_dot", 0.0)),
-                        bool(getattr(args, "gnn_soft_nms", False)),
-                        bool(getattr(args, "gnn_use_hard_geom_gate", True)),
-                        bool(getattr(args, "gnn_soft_geom_gate", False)),
-                        self._e2e_conf_idx,
-                    )
-                )
-            elif self.e2e_mode == "center":
-                self.e2e_head = YolinoCenterPolyHead(
-                    line_rep=coords.line_representation.enum,
-                    fpn_channels=head_feat_channels,
-                    token_dim=int(getattr(args, "e2e_token_dim", 256)),
-                    num_queries=int(getattr(args, "center_num_queries", 20)),
-                    num_points=int(getattr(args, "center_num_points", 10)),
-                    decoder_layers=int(getattr(args, "center_decoder_layers", 4)),
-                    decoder_heads=int(getattr(args, "center_decoder_heads", 8)),
-                    decoder_ff=int(getattr(args, "center_decoder_ff", 1024)),
-                    dropout=float(getattr(args, "center_dropout", 0.1)),
-                    local_radius_px=float(getattr(args, "center_local_radius_px", 64.0)),
-                    mask_mode=str(getattr(args, "center_mask_mode", "per_center")),
-                    init_spread_px=float(getattr(args, "center_init_spread_px", 32.0)),
-                    nms_kernel=int(getattr(args, "center_nms_kernel", 3)),
-                    peak_thresh=float(getattr(args, "center_peak_thresh", 0.05)),
-                    peak_nms_dist_px=float(getattr(args, "center_peak_nms_dist_px", 12.0)),
-                    delta_bound=str(getattr(args, "center_delta_bound", "tanh")),
-                    delta_max_px=float(getattr(args, "center_delta_max_px", 64.0)),
-                )
-                Log.info(
-                    "YolinoCenterPolyHead enabled (K=%d, N=%d, layers=%d, heads=%d, "
-                    "token_dim=%d, local_radius_px=%.1f, init_spread_px=%.1f, "
-                    "mask_mode=%s, delta_bound=%s, delta_max_px=%.1f, peak_nms_px=%.1f, conf_idx=%d)"
-                    % (
-                        self.e2e_head.K,
-                        self.e2e_head.N,
-                        self.e2e_head.decoder_layers,
-                        self.e2e_head.decoder_heads,
-                        self.e2e_head.token_dim,
-                        self.e2e_head.local_radius_px,
-                        self.e2e_head.init_spread_px,
-                        self.e2e_head.mask_mode,
-                        self.e2e_head.delta_bound,
-                        self.e2e_head.delta_max_px,
-                        float(getattr(self.e2e_head, "peak_nms_dist_px", 0.0)),
-                        self._e2e_conf_idx,
-                    )
-                )
-            elif self.e2e_mode == "learnable_detr":
-                from yolino.model.yolino_learnable_detr_head import YolinoLearnableDetrPolyHead
-
-                self.e2e_head = YolinoLearnableDetrPolyHead(
-                    fpn_channels=head_feat_channels,
-                    token_dim=int(getattr(args, "e2e_token_dim", 256)),
-                    num_queries=int(getattr(args, "e2e_num_queries", 20)),
-                    decoder_layers=int(getattr(args, "e2e_decoder_layers", 6)),
-                    decoder_heads=int(getattr(args, "e2e_decoder_heads", 8)),
-                    decoder_ff=int(getattr(args, "e2e_decoder_ff", 1024)),
-                    dropout=float(getattr(args, "gnn_dropout", 0.1)),
-                    max_step_norm=float(getattr(args, "e2e_hough_max_step_norm", 0.1)),
-                    mem_encoder_layers=int(getattr(args, "e2e_hough_mem_encoder_layers", 1)),
-                    dn_mode=str(getattr(args, "e2e_hough_dn_mode", "simple")),
-                    dn_groups=int(getattr(args, "e2e_hough_dn_groups", 3)),
-                    dn_sigma_xy=float(getattr(args, "e2e_hough_dn_sigma_xy", 0.05)),
-                    dn_length_scale=float(getattr(args, "e2e_hough_dn_length_scale", 0.2)),
-                    dn_rot_deg=float(getattr(args, "e2e_hough_dn_rot_deg", 10.0)),
-                    dn_off_epoch=int(getattr(args, "e2e_dn_off_epoch", -1)),
-                    gt_vertical_angle_deg=float(getattr(args, "e2e_gt_vertical_angle_deg", 80.0)),
-                )
-                Log.info(
-                    "YolinoLearnableDetrPolyHead enabled (K=%d, layers=%d, heads=%d, token_dim=%d, "
-                    "max_step_norm=%.3f, mem_enc=%d, dn=%s, dn_groups=%d, dn_off_epoch=%d)"
-                    % (
-                        self.e2e_head.K,
-                        self.e2e_head.decoder_layers_n,
-                        self.e2e_head.decoder_heads,
-                        self.e2e_head.token_dim,
-                        self.e2e_head.max_step_norm,
-                        self.e2e_head.mem_encoder_layers,
-                        self.e2e_head.dn_mode,
-                        self.e2e_head.dn_groups,
-                        self.e2e_head.dn_off_epoch,
-                    )
-                )
-            elif self.e2e_mode == "hough_detr":
-                from yolino.model.yolino_hough_detr_head import YolinoHoughDetrPolyHead
-
-                self.e2e_head = YolinoHoughDetrPolyHead(
-                    line_rep=coords.line_representation.enum,
-                    fpn_channels=head_feat_channels,
-                    token_dim=int(getattr(args, "e2e_token_dim", 256)),
-                    num_queries=int(getattr(args, "e2e_num_queries", 20)),
-                    decoder_layers=int(getattr(args, "e2e_decoder_layers", 4)),
-                    decoder_heads=int(getattr(args, "e2e_decoder_heads", 8)),
-                    decoder_ff=int(getattr(args, "e2e_decoder_ff", 1024)),
-                    dropout=float(getattr(args, "gnn_dropout", 0.1)),
-                    conf_thresh=float(getattr(args, "e2e_hough_seg_conf_thresh", 0.3)),
-                    max_segments=int(getattr(args, "e2e_hough_max_segments", 512)),
-                    dbscan_eps=float(getattr(args, "e2e_hough_dbscan_eps", 0.05)),
-                    dbscan_min_samples=int(getattr(args, "e2e_hough_dbscan_min_samples", 2)),
-                    rho_weight=float(getattr(args, "e2e_hough_rho_weight", 1.0)),
-                    theta_weight=float(getattr(args, "e2e_hough_theta_weight", 1.0)),
-                    L_init_default=float(getattr(args, "e2e_hough_L_init_default", 0.3)),
-                    pt_radius_norm=float(getattr(args, "e2e_hough_pt_radius_norm", 0.08)),
-                    max_step_norm=float(getattr(args, "e2e_hough_max_step_norm", 0.05)),
-                    mem_encoder_layers=int(getattr(args, "e2e_hough_mem_encoder_layers", 1)),
-                    dn_mode=str(getattr(args, "e2e_hough_dn_mode", "simple")),
-                    dn_groups=int(getattr(args, "e2e_hough_dn_groups", 3)),
-                    dn_sigma_xy=float(getattr(args, "e2e_hough_dn_sigma_xy", 0.05)),
-                    dn_length_scale=float(getattr(args, "e2e_hough_dn_length_scale", 0.2)),
-                    dn_rot_deg=float(getattr(args, "e2e_hough_dn_rot_deg", 10.0)),
-                    gt_vertical_angle_deg=float(getattr(args, "e2e_gt_vertical_angle_deg", 80.0)),
-                )
-                Log.info(
-                    "YolinoHoughDetrPolyHead enabled (K=%d, layers=%d, heads=%d, token_dim=%d, "
-                    "pt_radius_norm=%.3f, max_step_norm=%.3f, mem_enc=%d, dn=%s, dn_groups=%d, "
-                    "conf_idx=%d)"
-                    % (
-                        self.e2e_head.K,
-                        self.e2e_head.decoder_layers,
-                        self.e2e_head.decoder_heads,
-                        self.e2e_head.token_dim,
-                        self.e2e_head.pt_radius_norm,
-                        self.e2e_head.max_step_norm,
-                        self.e2e_head.mem_encoder_layers,
-                        self.e2e_head.dn_mode,
-                        self.e2e_head.dn_groups,
-                        self._e2e_conf_idx,
-                    )
-                )
+            )
             self._e2e_geom_activations = get_activations(args.activations, coords, args.linerep)
+
 
     def forward(self, x):
         """
@@ -1131,8 +869,8 @@ class YolinoNet(nn.Module):
             (geom_pred, embed_pred) or (geom_pred, embed_pred, e2e_out):
                 geom_pred  with shape [batch, cells, preds, vars_train]
                 embed_pred with shape [batch, cells, preds, embed_dim]
-                e2e_out (only if ``e2e_differentiable_postproc``): dict from :class:`YolinoDetrBezierHead`
-                with K Bézier polyline predictions and objectness logits. Computed inside ``forward`` so
+                e2e_out (only if ``e2e_differentiable_postproc``): dict from :class:`YolinoGnnSegmentGraphHead`
+                with segment-graph edge logits and node features. Computed inside ``forward`` so
                 DDP sees all ``e2e_head`` parameters in the same autograd pass as the backbone.
                 where cells = (H/stride) * (W/stride) for the chosen FPN head level.
         """
@@ -1207,89 +945,22 @@ class YolinoNet(nn.Module):
                      self.embed_dim, self.num_predictors, self._head_feat_level))
         if self.e2e_head is not None:
             stride_f = float(self.scale)
-            # Heads that consume GT during forward (hough_detr DN) read it from
-            # this transient stash set by ForwardRunner; we clear it immediately
-            # to avoid cross-batch leakage.
-            pending_gt = getattr(self, "_pending_e2e_gt_pack", None)
-            if hasattr(self, "_pending_e2e_gt_pack"):
-                self._pending_e2e_gt_pack = None
-            pending_epoch = getattr(self, "_pending_e2e_epoch", None)
-            if hasattr(self, "_pending_e2e_epoch"):
-                self._pending_e2e_epoch = None
-            if self.e2e_mode == "std_seg_detr":
-                e2e_out = self.e2e_head(
-                    x_geom,
-                    stride_f,
-                    in_h,
-                    in_w,
-                    self._e2e_conf_idx,
-                )
-            elif self.e2e_mode == "hough_detr":
-                geom_act_e2e, _ = self._e2e_geom_activations((geom_pred, embed_pred))
-                e2e_out = self.e2e_head(
-                    geom_act_e2e.detach(),
-                    x_geom,
-                    stride_f,
-                    in_h,
-                    in_w,
-                    self._e2e_conf_idx,
-                    e2e_gt_pack=pending_gt,
-                )
-            elif self.e2e_mode == "learnable_detr":
-                # Learnable-query head: no geom_act dependency (queries are
-                # ``nn.Embedding`` params; DN GT comes from ``pending_gt``).
-                e2e_out = self.e2e_head(
-                    x_geom,
-                    stride_f,
-                    in_h,
-                    in_w,
-                    e2e_gt_pack=pending_gt,
-                    current_epoch=pending_epoch,
-                )
-            else:
-                geom_act_e2e, _ = self._e2e_geom_activations((geom_pred, embed_pred))
-                e2e_out = self.e2e_head(
-                    geom_act_e2e,
-                    x_geom,
-                    stride_f,
-                    in_h,
-                    in_w,
-                    self._e2e_conf_idx,
-                )
+            geom_act_e2e, _ = self._e2e_geom_activations((geom_pred, embed_pred))
+            e2e_out = self.e2e_head(
+                geom_act_e2e,
+                x_geom,
+                stride_f,
+                in_h,
+                in_w,
+                self._e2e_conf_idx,
+            )
             return geom_pred, embed_pred, e2e_out
         return geom_pred, embed_pred
 
     def run_e2e_post(self, geom_act: torch.Tensor, pack: dict):
-        """Run E2E head on **activated** geometry (same layout as training loss)."""
+        """Run GNN E2E head on **activated** geometry (same layout as training loss)."""
         if self.e2e_head is None:
             return None
-        if self.e2e_mode == "std_seg_detr":
-            return self.e2e_head(
-                pack["head_feat"],
-                pack["stride"],
-                pack["img_h"],
-                pack["img_w"],
-                self._e2e_conf_idx,
-            )
-        if self.e2e_mode == "hough_detr":
-            return self.e2e_head(
-                geom_act.detach(),
-                pack["head_feat"],
-                pack["stride"],
-                pack["img_h"],
-                pack["img_w"],
-                self._e2e_conf_idx,
-                e2e_gt_pack=None,
-            )
-        if self.e2e_mode == "learnable_detr":
-            return self.e2e_head(
-                pack["head_feat"],
-                pack["stride"],
-                pack["img_h"],
-                pack["img_w"],
-                e2e_gt_pack=None,
-                current_epoch=None,
-            )
         return self.e2e_head(
             geom_act,
             pack["head_feat"],
