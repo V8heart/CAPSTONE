@@ -65,10 +65,8 @@ class ForwardRunner:
         Args:
             images (torch.tensor):
                 [batch, 3, height, width]
-            e2e_gt_pack: optional GT polyline pack (TTPLA collate). Required only by
-                heads that need GT at forward time — e.g. ``--e2e_mode=hough_detr``
-                with denoising training enabled (``e2e_hough_dn_mode != "none"``).
-                Pass ``None`` for inference / heads that don't consume GT.
+            e2e_gt_pack: optional GT polyline pack (TTPLA collate) for GNN edge loss.
+                Pass ``None`` for inference.
 
         Returns:
             tuple: ``(geom_act, embed_act, geom_logits, e2e_out)`` — activated geometry, embedding preds,
@@ -82,17 +80,7 @@ class ForwardRunner:
 
         inference_start = timeit.default_timer()
         self.model.train(is_train)
-        # Only heads that consume GT inside forward (hough_detr DN) need this stash.
-        # The model reads + clears it at the end of forward so it never leaks across
-        # backward boundaries.
         net = self.model.module if hasattr(self.model, "module") else self.model
-        if e2e_gt_pack is not None and getattr(net, "e2e_head", None) is not None:
-            net._pending_e2e_gt_pack = e2e_gt_pack
-        # Heads that gate behavior on the current training epoch (e.g.
-        # ``learnable_detr`` with ``--e2e_dn_off_epoch``) read this transient
-        # stash; cleared by the model at the end of forward to avoid leakage.
-        if getattr(net, "e2e_head", None) is not None:
-            net._pending_e2e_epoch = epoch
         if is_train:
             logits = self.model(images)
         else:
