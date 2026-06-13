@@ -113,7 +113,80 @@ specified. It is recommended to use only weights and biases. File logging slows 
 
 ### Dataset Paths
 
-The code expects the dataset files to be accessible at the environment variable fitting the dataset e.g. `$DATASET_TUSIMPLE` and `$DATASET_CULANE`, respectively. The suffix is determined by the `Dataset` enum in `utils/enums.py`, which is used by the argparser and for assigning the dataset classes. 
+The code expects the dataset files to be accessible at the environment variable fitting the dataset e.g. `$DATASET_TUSIMPLE` and `$DATASET_CULANE`, respectively. The suffix is determined by the `Dataset` enum in `utils/enums.py`, which is used by the argparser and for assigning the dataset classes.
+
+### TTPLA dataset & model weights (Hugging Face)
+
+Large artifacts (datasets and checkpoints) are **not** stored in this GitHub repository.
+Download them from Hugging Face and point CAPSTONE at the local paths below.
+
+| Resource | Hugging Face repo | Status |
+|----------|-------------------|--------|
+| TTPLA benchmark (512×512) | [V8heart/yolino-ttpla-benchmark](https://huggingface.co/datasets/V8heart/yolino-ttpla-benchmark) | Available |
+| GNN checkpoints | [V8heart/CAPSTONE-gnn-weights](https://huggingface.co/V8heart/CAPSTONE-gnn-weights) | Coming soon |
+
+#### Install the Hugging Face CLI
+
+```bash
+pip install -U huggingface_hub
+hf auth login   # use a token with **Write** access if you plan to upload
+```
+
+#### Download the TTPLA dataset
+
+```bash
+hf download V8heart/yolino-ttpla-benchmark \
+  --repo-type dataset \
+  --local-dir ./YOLinO_benchmark
+```
+
+Expected layout after download:
+
+```
+YOLinO_benchmark/
+├── images/{train,val,test}/*.png
+└── labels/{train,val,test}/*.npy
+```
+
+#### Train with the downloaded dataset
+
+Option A — environment variable (recommended):
+
+```bash
+export DATASET_TTPLA="$(pwd)/YOLinO_benchmark"
+
+bash run.sh \
+  --config configs/experiments/exp77_ttpla_512512_from_exp19.yaml \
+  --dataset-root "$DATASET_TTPLA"
+```
+
+Option B — pass the path only via `run.sh`:
+
+```bash
+bash run.sh \
+  --config configs/experiments/exp80_ttpla_512512_scale16.yaml \
+  --dataset-root /path/to/YOLinO_benchmark
+```
+
+`TTPLADataset` resolves the root from `DATASET_TTPLA` (see `src/yolino/dataset/ttpla.py`).
+Experiment YAMLs under `configs/experiments/` may still contain machine-local `dataset_ttpla` paths; override them with `--dataset-root` or `DATASET_TTPLA` when cloning on a new machine.
+
+#### Download model weights (when published)
+
+```bash
+hf download V8heart/CAPSTONE-gnn-weights \
+  exp81_gnn_ttpla_512512_from_exp80/best_model.pth \
+  --repo-type model \
+  --local-dir ttpla_train_exp/log/checkpoints/exp81_gnn_ttpla_512512_from_exp80
+```
+
+Then set in your experiment YAML (path is relative to `ttpla_train_exp/` by default):
+
+```yaml
+explicit_model: "log/checkpoints/exp81_gnn_ttpla_512512_from_exp80/best_model.pth"
+```
+
+Or pass an absolute path on the CLI: `--explicit_model /path/to/best_model.pth`.
 
 #### Argoverse 2 
 If you would like to use the argoverse datareader, be aware that you have to prepare the dataset first. 
