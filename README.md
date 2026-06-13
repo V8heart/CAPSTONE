@@ -4,9 +4,22 @@ Aerial powerline (TTPLA) polyline detection built on the [YOLinO](https://github
 
 **Pipeline**
 - **Stage 1 (`exp80`)** — train YOLinO geometry + confidence (ConvNeXt-Tiny, FPN, 512×512, scale 16 / P3).
-- **Stage 2 (`exp81`)** — freeze the geom backbone and train the GNN post-processor on top of Stage 1 weights.
+- **Stage 2 (`exp82`)** — freeze the geom backbone and train the GNN post-processor on top of Stage 1 weights (GNN settings from `exp71`).
 
 Large artifacts (dataset & checkpoints) are hosted on [Hugging Face](https://huggingface.co/V8heart); this repo contains code and experiment configs only.
+
+## Results (preview)
+
+| Stage | Config | Description |
+|-------|--------|-------------|
+| **Stage 1** | `exp80` | YOLinO geom + confidence (pred \| GT, conf ≥ 0.7) |
+| **Stage 2** | `exp82` | GNN assembly — *coming soon* |
+
+**Stage 1 example** (`71_4520`, val split):
+
+![Stage 1 example — YOLinO geom prediction (left) vs GT (right)](docs/images/stage1_example.png)
+
+**Stage 2 example:** *TBD after `exp82` training completes.*
 
 ---
 
@@ -101,29 +114,23 @@ bash run.sh \
   --nproc 4
 ```
 
-### Stage 2 — GNN head (`exp81`)
+### Stage 2 — GNN head (`exp82`)
 
-Config: `configs/experiments/exp81_gnn_ttpla_512512_from_exp80.yaml`
+Config: `configs/experiments/exp82_gnn_ttpla_512512_from_exp80.yaml`
 
-Warm-starts from Stage 1 `best_model.pth` (`explicit_model` in the YAML). Backbone/geom/FPN are frozen; only the GNN (`e2e_mode: gnn`) is trained.
+Warm-starts from Stage 1 `best_model.pth` (`explicit_model` in the YAML). Backbone/geom/FPN are frozen; only the GNN (`e2e_mode: gnn`) is trained. GNN hyperparameters follow `exp71` (`directional2`, BCE edge loss).
 
 ```bash
 # requires Stage 1 checkpoint at:
 # ttpla_train_exp/log/checkpoints/exp80_ttpla_512512_scale16/best_model.pth
 
 bash run.sh \
-  --config configs/experiments/exp81_gnn_ttpla_512512_from_exp80.yaml \
+  --config configs/experiments/exp82_gnn_ttpla_512512_from_exp80.yaml \
   --dataset-root "$DATASET_TTPLA" \
-  --nproc 4
+  --nproc 3
 ```
 
-Output checkpoint (local training):
-
-```
-ttpla_train_exp/log/checkpoints/exp81_gnn_ttpla_512512_from_exp80/ep0058_model.pth   # last epoch (published on HF)
-```
-
-> **Note:** `best_model.pth` is currently selected by the YOLinO geom-head validation loss, not GNN metrics. The Hugging Face release uses the **last-epoch** weights (`ep0058`) until a GNN-aware best-model criterion is added.
+> Previous Stage 2 experiment: `exp81_gnn_ttpla_512512_from_exp80.yaml` (directional2_ctx + cross_ignore loss).
 
 ### Download checkpoint (skip training)
 
@@ -197,7 +204,8 @@ CAPSTONE/
 ├── run.sh                          # main training launcher (DDP)
 ├── configs/experiments/
 │   ├── exp80_ttpla_512512_scale16.yaml      # Stage 1
-│   └── exp81_gnn_ttpla_512512_from_exp80.yaml  # Stage 2
+│   ├── exp81_gnn_ttpla_512512_from_exp80.yaml  # Stage 2 (prev.)
+│   └── exp82_gnn_ttpla_512512_from_exp80.yaml  # Stage 2 (current)
 ├── src/yolino/
 │   ├── train.py                    # training entry
 │   ├── predict.py                  # inference + visualization
