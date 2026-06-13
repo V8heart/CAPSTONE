@@ -53,6 +53,12 @@ hf download V8heart/yolino-ttpla-benchmark \
   --local-dir ./YOLinO_benchmark
 
 export DATASET_TTPLA="$(pwd)/YOLinO_benchmark"
+
+# optional: download Stage 2 checkpoint for inference
+hf download V8heart/CAPSTONE-gnn-weights \
+  exp81_gnn_ttpla_512512_from_exp80/ep0058_model.pth \
+  --repo-type model \
+  --local-dir ttpla_train_exp/log/checkpoints/exp81_gnn_ttpla_512512_from_exp80
 ```
 
 Expected dataset layout:
@@ -66,7 +72,7 @@ YOLinO_benchmark/
 | Resource | Hugging Face | Status |
 |----------|--------------|--------|
 | TTPLA benchmark (512×512) | [V8heart/yolino-ttpla-benchmark](https://huggingface.co/datasets/V8heart/yolino-ttpla-benchmark) | Available |
-| Trained checkpoints | [V8heart/CAPSTONE-gnn-weights](https://huggingface.co/V8heart/CAPSTONE-gnn-weights) | Coming soon |
+| Stage 2 checkpoint (`exp81`, ep58) | [V8heart/CAPSTONE-gnn-weights](https://huggingface.co/V8heart/CAPSTONE-gnn-weights) | Available |
 
 ---
 
@@ -111,26 +117,29 @@ bash run.sh \
   --nproc 4
 ```
 
-Output checkpoint:
+Output checkpoint (local training):
 
 ```
-ttpla_train_exp/log/checkpoints/exp81_gnn_ttpla_512512_from_exp80/best_model.pth
+ttpla_train_exp/log/checkpoints/exp81_gnn_ttpla_512512_from_exp80/ep0058_model.pth   # last epoch (published on HF)
 ```
 
-### Download checkpoints (skip training)
+> **Note:** `best_model.pth` is currently selected by the YOLinO geom-head validation loss, not GNN metrics. The Hugging Face release uses the **last-epoch** weights (`ep0058`) until a GNN-aware best-model criterion is added.
 
-When weights are published on Hugging Face:
+### Download checkpoint (skip training)
+
+Published on Hugging Face — Stage 2 only (`exp81`, epoch 58):
 
 ```bash
 hf download V8heart/CAPSTONE-gnn-weights \
-  exp80_ttpla_512512_scale16/best_model.pth \
-  --repo-type model \
-  --local-dir ttpla_train_exp/log/checkpoints/exp80_ttpla_512512_scale16
-
-hf download V8heart/CAPSTONE-gnn-weights \
-  exp81_gnn_ttpla_512512_from_exp80/best_model.pth \
+  exp81_gnn_ttpla_512512_from_exp80/ep0058_model.pth \
   --repo-type model \
   --local-dir ttpla_train_exp/log/checkpoints/exp81_gnn_ttpla_512512_from_exp80
+```
+
+This places the file at:
+
+```
+ttpla_train_exp/log/checkpoints/exp81_gnn_ttpla_512512_from_exp80/ep0058_model.pth
 ```
 
 ---
@@ -153,7 +162,7 @@ export PYTHONPATH="../src"
   --log_dir ttpla_experiments \
   --split val \
   --gpu \
-  --explicit_model log/checkpoints/exp81_gnn_ttpla_512512_from_exp80/best_model.pth
+  --explicit_model log/checkpoints/exp81_gnn_ttpla_512512_from_exp80/ep0058_model.pth
 ```
 
 Debug images are written under `ttpla_train_exp/debug/prediction/`.
@@ -172,7 +181,7 @@ export PYTHONPATH="../src"
   --log_dir ttpla_experiments \
   --split val \
   --gpu \
-  --explicit_model log/checkpoints/exp81_gnn_ttpla_512512_from_exp80/best_model.pth
+  --explicit_model log/checkpoints/exp81_gnn_ttpla_512512_from_exp80/ep0058_model.pth
 ```
 
 Replace `../venv/bin/python` with your `PYTHON_BIN` if the venv path differs.
