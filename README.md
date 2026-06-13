@@ -1,6 +1,12 @@
 # CAPSTONE: Powerline Detection with YOLinO + GNN
 
-Aerial powerline (TTPLA) polyline detection built on the [YOLinO](https://github.com/KIT-MRT/YOLinO) single-shot backbone, extended with a **Graph Attention Network (GAT)** head for instance-level wire assembly.
+## Abstract
+
+CAPSTONE detects aerial powerlines in TTPLA imagery using a **two-stage** pipeline. **Stage 1** runs a YOLinO-style single-shot detector (ConvNeXt-Tiny + FPN) to predict per-cell line geometry and confidence. **Stage 2** freezes that backbone and trains a **Graph Attention Network (GAT)** on predicted segments to assemble individual wires into instance-level polylines. Datasets and checkpoints are published on Hugging Face; this repository provides training, inference, and experiment configs.
+
+## Model architecture
+
+![CAPSTONE two-stage architecture: YOLinO geom head + GNN assembly](docs/images/Model_Architecture.png)
 
 **Pipeline**
 - **Stage 1 (`exp80`)** — train YOLinO geometry + confidence (ConvNeXt-Tiny, FPN, 512×512, scale 16 / P3).
