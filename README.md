@@ -3,13 +3,15 @@
 **[Korea Institute of Energy Technology](https://www.kentech.ac.kr/) (KENTECH)**
 
 **Students**
-[**최재영**](https://github.com/V8heart) — agew1597@kentech.ac.kr  
-[**최동제**](https://github.com/URIBARI) — cdj0418@kentech.ac.kr  
-[**강원용**](https://github.com/wonyong-3927) — wonyong3927@kentech.ac.kr  
-[**이현승**](https://github.com/Ark-sty) — pruina@kentech.ac.kr  
 
-**Advisor**  
-[**Seokju Lee**](https://github.com/SeokjuLee) — slee@kentech.ac.kr  
+- [**최재영**](https://github.com/V8heart) — agew1597@kentech.ac.kr
+- [**최동제**](https://github.com/URIBARI) — cdj0418@kentech.ac.kr
+- [**강원용**](https://github.com/wonyong-3927) — wonyong3927@kentech.ac.kr
+- [**이현승**](https://github.com/Ark-sty) — pruina@kentech.ac.kr
+
+**Advisor**
+
+- [**Seokju Lee**](https://github.com/SeokjuLee) — slee@kentech.ac.kr
 
 *Capstone project — [viewlab-group/Capstone26s-PowerLineDetection-dev](https://github.com/viewlab-group/Capstone26s-PowerLineDetection-dev)*
 
