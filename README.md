@@ -1,5 +1,18 @@
 # CAPSTONE: Powerline Detection with YOLinO + GNN
 
+**[Korea Institute of Energy Technology](https://www.kentech.ac.kr/) (KENTECH)**
+
+**Students**
+[**최재영**](https://github.com/V8heart) — agew1597@kentech.ac.kr  
+[**최동제**](https://github.com/URIBARI) — cdj0418@kentech.ac.kr  
+[**강원용**](https://github.com/wonyong-3927) — wonyong3927@kentech.ac.kr  
+[**이현승**](https://github.com/Ark-sty) — pruina@kentech.ac.kr  
+
+**Advisor**  
+[**Seokju Lee**](https://github.com/SeokjuLee) — slee@kentech.ac.kr  
+
+*Capstone project — [viewlab-group/Capstone26s-PowerLineDetection-dev](https://github.com/viewlab-group/Capstone26s-PowerLineDetection-dev)*
+
 ## Abstract
 
 CAPSTONE detects aerial powerlines in TTPLA imagery using a **two-stage** pipeline. **Stage 1** runs a YOLinO-style single-shot detector (ConvNeXt-Tiny + FPN) to predict per-cell line geometry and confidence. **Stage 2** freezes that backbone and trains a **Graph Attention Network (GAT)** on predicted segments to assemble individual wires into instance-level polylines. Datasets and checkpoints are published on Hugging Face; this repository provides training, inference, and experiment configs.
@@ -253,4 +266,4 @@ If you use this code, please cite the original YOLinO paper and the GAT architec
 
 ## Acknowledgments
 
-This project extends the open-source [YOLinO](https://github.com/KIT-MRT/YOLinO) framework (Karlsruhe Institute of Technology). CAPSTONE-specific changes focus on TTPLA powerline detection with a GNN-based instance assembly stage.
+This project extends the open-source [YOLinO](https://github.com/KIT-MRT/YOLinO) framework (Karlsruhe Institute of Technology). CAPSTONE-specific changes focus on TTPLA powerline detection with a GNN-based instance assembly stage, developed at the [Korea Institute of Energy Technology](https://www.kentech.ac.kr/) under the supervision of [Seokju Lee](https://github.com/SeokjuLee).
