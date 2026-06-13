@@ -206,6 +206,10 @@ ttpla_train_exp/**/checkpoints/
 *.gif
 *.bmp
 
+# README / documentation assets (tracked PNGs go here only)
+!docs/images/
+!docs/images/**
+
 # Optional local clutter (uncomment if needed)
 # ttpla_train_exp/debug_id_assignment_report.json
 
