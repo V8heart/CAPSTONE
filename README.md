@@ -1,146 +1,61 @@
-# YOLinO: Polyline Estimation
+# CAPSTONE: Powerline Detection with YOLinO + GNN
 
-The repository contains code to train and evaluate our YOLinO network for polyline estimation from RGB images. The code was developed for a PhD thesis and is targeted towards evaluating rather productive use.
+Aerial powerline (TTPLA) polyline detection built on the [YOLinO](https://github.com/KIT-MRT/YOLinO) single-shot backbone, extended with a **Graph Attention Network (GAT)** head for instance-level wire assembly.
 
-## Open Issues
-There are some issues we want to tackle in the future:
-- [ ] Cleanup code
-- [ ] Extract experiment coding for clean code structure
-- [ ] Migrate from Gitlab CI to Github Actions
-- [ ] Add proper documentation
-- [ ] Provide parametrization instructions
-- [ ] Provide params.yaml for Argoverse, Tusimple, CULane, ...
+**Pipeline**
+- **Stage 1 (`exp80`)** — train YOLinO geometry + confidence (ConvNeXt-Tiny, FPN, 512×512, scale 16 / P3).
+- **Stage 2 (`exp81`)** — freeze the geom backbone and train the GNN post-processor on top of Stage 1 weights.
 
-## Citation
-When using this code please cite our publications:
-```
-@inproceedings{meyer2021yolino,
-  title={YOLinO: Generic Single Shot Polyline Setection in Real Time},
-  author={Meyer, Annika and Skudlik, Philipp and Pauls, Jan-Hendrik and Stiller, Christoph},
-  booktitle={Proceedings of the IEEE/CVF International Conference on Computer Vision Workshops},
-  pages={2916--2925},
-  year={2021}
-}
-```
+Large artifacts (dataset & checkpoints) are hosted on [Hugging Face](https://huggingface.co/V8heart); this repo contains code and experiment configs only.
 
+---
 
-## Installation
+## Requirements
 
-### Virtual Environments
-It is recommended to use a virtualenv or conda to wrap your python packages from the rest of your system. Especially tensorflow and pytorch might exist in another version on a server.
+- Python 3.10+ (tested with the project venv below)
+- CUDA-capable GPU(s) for training (4-GPU DDP by default)
+- [`huggingface_hub`](https://huggingface.co/docs/huggingface_hub) CLI (`hf`) for downloading data/weights
 
-#### Conda
-I recommend to use conda: https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html#starting-conda
-After installation you should be able to create your conda environment with
-```
-conda create --name yolino pip python==3.8
-```
-You might want to have autocomplete with `conda install argcomplete`. Then add `eval "$(register-python-argcomplete conda)"` to your bash file. For zshell use https://github.com/conda-incubator/conda-zsh-completion/blob/master/_conda.
+### Virtual environment
 
-#### Virtualenv
-If you want to use virtualenvwrapper: https://virtualenvwrapper.readthedocs.io/en/latest/install.html
-After installation you should be able to create your virtualenv with
-```
-mkvirtualenv yolino --python=/usr/bin/python3
-```
+We use a **Python venv** (not conda) for this project:
 
-Make sure your PYTHONPATH is empty. Maybe add `export PYTHONPATH=` to your virtualenv scripts e.g. `~/.virtualenvs/yolino/bin/postactivate`.
-
-
-### Clone repo
 ```bash
-mkdir yolino
-cd yolino
-git clone https://github.com/KIT-MRT/YOLinO.git
-
-conda create --name yolino pip python==3.8
-# Alternative: mkvirtualenv yolino --python=/usr/bin/python3
-
-# --- You should be working in a virtual env now ---
-
-# Install requirements
+# create once (example)
+python3 -m venv /path/to/venv
+source /path/to/venv/bin/activate
 pip install -e .
+
+# our server default (also used by run.sh)
+# /home/work/caps_drone/yolino/venv/bin/python
 ```
 
-### CUDA
-
-If you want to use a specific cuda version have a look at `https://pytorch.org/get-started/previous-versions/`. For CUDA 11.6 it is recommended to use
-```
-conda install pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.6 -c pytorch -c conda-forge
-```
-
-### Get weights
-
-Download the darknet weights at https://pjreddie.com/media/files/yolov3.weights. Provide the path with `--darknet_weights` whenever you want to use the weights in training. 
-
-### Folder Setup
-
-So far a second folder is necessary next to the acutal yolino package, where we store parametrization, checkpoints etc. We recommend to use separate folders for dealing with different datasets or configurations. For example, we use `tus_po_8p_dn19` as a good start for the tusimple dataset. The name encodes the **tus**imple dataset with **po**ints line representation, **8 p**redictors without any upsampling on **darknet-19**. The scripts expect this folder structure by default. Pass `--root` (path to the yolino folder), `--dvc` (folder containing your output) and `--config` (path to a params.yaml) if the structure is different.
-
-  ```
-  ├── tus_md_8p_dn19
-  │   ├── params.yaml
-  │   ├── default_params.yaml
-  │   ├── ...
-  ├── tus_po_8p_dn19
-  │   ├── params.yaml
-  │   ├── default_params.yaml
-  │   ├── ...
-  ├── yolino
-    ├── setup.py
-    ├── src
-    │   ├── ...
-    ├── ...
-  ```
-
-### Logging Server
-
-We can log automatically to weights and biases, clearml, command line and logging file. With `--loggers` this can be
-specified. It is recommended to use only weights and biases. File logging slows down the process as it logs everything.
-
-- **Weights and Biases**: Setup your account on https://wandb.ai/site and run `wandb login` in your python environment
-  on your machine.
-- **Clearml**: Setup your account on https://app.clear.ml/ and run `clearml-init` in your python environment on your
-  machine.
-
-### Other Requirements
-
-- **Use Python3 only!**
-- On Servers: execute `echo "backend: Agg" > ~/.config/matplotlib/matplotlibrc` for non interacting matplotlib
-- List of requirements can be found in `setup.cfg` and will be automatically retrieved by `pip install -e yolino` (see
-  above)
-- If the tests fail, make sure you have git lfs setup and all files in test/test_data are fetched properly
-
-### Dataset Paths
-
-The code expects the dataset files to be accessible at the environment variable fitting the dataset e.g. `$DATASET_TUSIMPLE` and `$DATASET_CULANE`, respectively. The suffix is determined by the `Dataset` enum in `utils/enums.py`, which is used by the argparser and for assigning the dataset classes.
-
-### TTPLA dataset & model weights (Hugging Face)
-
-Large artifacts (datasets and checkpoints) are **not** stored in this GitHub repository.
-Download them from Hugging Face and point CAPSTONE at the local paths below.
-
-| Resource | Hugging Face repo | Status |
-|----------|-------------------|--------|
-| TTPLA benchmark (512×512) | [V8heart/yolino-ttpla-benchmark](https://huggingface.co/datasets/V8heart/yolino-ttpla-benchmark) | Available |
-| GNN checkpoints | [V8heart/CAPSTONE-gnn-weights](https://huggingface.co/V8heart/CAPSTONE-gnn-weights) | Coming soon |
-
-#### Install the Hugging Face CLI
+`run.sh` picks up `PYTHON_BIN` automatically; override if your venv lives elsewhere:
 
 ```bash
+export PYTHON_BIN=/path/to/venv/bin/python
+```
+
+---
+
+## Quick start
+
+```bash
+git clone https://github.com/V8heart/CAPSTONE.git
+cd CAPSTONE
+source /path/to/venv/bin/activate   # or set PYTHON_BIN
+pip install -e .
 pip install -U huggingface_hub
-hf auth login   # use a token with **Write** access if you plan to upload
-```
 
-#### Download the TTPLA dataset
-
-```bash
+# download TTPLA benchmark (512×512)
 hf download V8heart/yolino-ttpla-benchmark \
   --repo-type dataset \
   --local-dir ./YOLinO_benchmark
+
+export DATASET_TTPLA="$(pwd)/YOLinO_benchmark"
 ```
 
-Expected layout after download:
+Expected dataset layout:
 
 ```
 YOLinO_benchmark/
@@ -148,104 +63,171 @@ YOLinO_benchmark/
 └── labels/{train,val,test}/*.npy
 ```
 
-#### Train with the downloaded dataset
+| Resource | Hugging Face | Status |
+|----------|--------------|--------|
+| TTPLA benchmark (512×512) | [V8heart/yolino-ttpla-benchmark](https://huggingface.co/datasets/V8heart/yolino-ttpla-benchmark) | Available |
+| Trained checkpoints | [V8heart/CAPSTONE-gnn-weights](https://huggingface.co/V8heart/CAPSTONE-gnn-weights) | Coming soon |
 
-Option A — environment variable (recommended):
+---
+
+## Training
+
+All training goes through `run.sh`, which sets `DATASET_TTPLA`, `PYTHONPATH`, and launches `torch.distributed.run`.
+
+Default: **4 GPUs** (`--nproc 4`, `CUDA_VISIBLE_DEVICES=0,1,2,3`). Adjust to your machine.
+
+### Stage 1 — YOLinO geometry baseline (`exp80`)
+
+Config: `configs/experiments/exp80_ttpla_512512_scale16.yaml`
+
+Trains geom + confidence only (no GNN). Output checkpoint:
+
+```
+ttpla_train_exp/log/checkpoints/exp80_ttpla_512512_scale16/best_model.pth
+```
 
 ```bash
 export DATASET_TTPLA="$(pwd)/YOLinO_benchmark"
 
 bash run.sh \
-  --config configs/experiments/exp77_ttpla_512512_from_exp19.yaml \
-  --dataset-root "$DATASET_TTPLA"
-```
-
-Option B — pass the path only via `run.sh`:
-
-```bash
-bash run.sh \
   --config configs/experiments/exp80_ttpla_512512_scale16.yaml \
-  --dataset-root /path/to/YOLinO_benchmark
+  --dataset-root "$DATASET_TTPLA" \
+  --nproc 4
 ```
 
-`TTPLADataset` resolves the root from `DATASET_TTPLA` (see `src/yolino/dataset/ttpla.py`).
-Experiment YAMLs under `configs/experiments/` may still contain machine-local `dataset_ttpla` paths; override them with `--dataset-root` or `DATASET_TTPLA` when cloning on a new machine.
+### Stage 2 — GNN head (`exp81`)
 
-#### Download model weights (when published)
+Config: `configs/experiments/exp81_gnn_ttpla_512512_from_exp80.yaml`
+
+Warm-starts from Stage 1 `best_model.pth` (`explicit_model` in the YAML). Backbone/geom/FPN are frozen; only the GNN (`e2e_mode: gnn`) is trained.
 
 ```bash
+# requires Stage 1 checkpoint at:
+# ttpla_train_exp/log/checkpoints/exp80_ttpla_512512_scale16/best_model.pth
+
+bash run.sh \
+  --config configs/experiments/exp81_gnn_ttpla_512512_from_exp80.yaml \
+  --dataset-root "$DATASET_TTPLA" \
+  --nproc 4
+```
+
+Output checkpoint:
+
+```
+ttpla_train_exp/log/checkpoints/exp81_gnn_ttpla_512512_from_exp80/best_model.pth
+```
+
+### Download checkpoints (skip training)
+
+When weights are published on Hugging Face:
+
+```bash
+hf download V8heart/CAPSTONE-gnn-weights \
+  exp80_ttpla_512512_scale16/best_model.pth \
+  --repo-type model \
+  --local-dir ttpla_train_exp/log/checkpoints/exp80_ttpla_512512_scale16
+
 hf download V8heart/CAPSTONE-gnn-weights \
   exp81_gnn_ttpla_512512_from_exp80/best_model.pth \
   --repo-type model \
   --local-dir ttpla_train_exp/log/checkpoints/exp81_gnn_ttpla_512512_from_exp80
 ```
 
-Then set in your experiment YAML (path is relative to `ttpla_train_exp/` by default):
+---
 
-```yaml
-explicit_model: "log/checkpoints/exp81_gnn_ttpla_512512_from_exp80/best_model.pth"
+## Inference & evaluation
+
+Run from `ttpla_train_exp/` with the project venv. Use the **Stage 2** config and checkpoint for full GNN assembly.
+
+### Visual prediction (overlay images)
+
+```bash
+cd ttpla_train_exp
+export DATASET_TTPLA="../YOLinO_benchmark"
+export PYTHONPATH="../src"
+
+../venv/bin/python ../src/yolino/predict.py \
+  -c ../configs/experiments/exp81_gnn_ttpla_512512_from_exp80.yaml \
+  --root .. \
+  --dvc . \
+  --log_dir ttpla_experiments \
+  --split val \
+  --gpu \
+  --explicit_model log/checkpoints/exp81_gnn_ttpla_512512_from_exp80/best_model.pth
 ```
 
-Or pass an absolute path on the CLI: `--explicit_model /path/to/best_model.pth`.
+Debug images are written under `ttpla_train_exp/debug/prediction/`.
 
-#### Argoverse 2 
-If you would like to use the argoverse datareader, be aware that you have to prepare the dataset first. 
-Set your environment properly with `$DATASET_ARGO2_IMG` targeting the original dataset folder and `$DATASET_ARGO2` pointing to an empty folder, where you would like your labels to be put. 
-Execute the dataset preparation with `--loading_workers` set to a suitable thread count. The script will generate a `.npy` file for every label containing the projected polylines in image coordinates. 
-```bash 
-python ../yolino/src/yolino/tools/prepare_argoverse2.py --dataset argo2 --input $DATASET_ARGO2_IMG --loading_workers 2
+### Metric evaluation
+
+```bash
+cd ttpla_train_exp
+export DATASET_TTPLA="../YOLinO_benchmark"
+export PYTHONPATH="../src"
+
+../venv/bin/python ../src/yolino/eval.py \
+  -c ../configs/experiments/exp81_gnn_ttpla_512512_from_exp80.yaml \
+  --root .. \
+  --dvc . \
+  --log_dir ttpla_experiments \
+  --split val \
+  --gpu \
+  --explicit_model log/checkpoints/exp81_gnn_ttpla_512512_from_exp80/best_model.pth
 ```
-If you would like to give it a try first set `--max_n 3` in order to only prepare e.g. 3 images. If you wish to not process all images in the sequences choose a subsampling rate with e.g. `-sdr 20` processing only every 20th image.
-When using the argoverse data after preparation (e.g. for training) use `-sdr 1` as it regards the generated label folder containing only every 20th label. 
 
-### Code execution examples
+Replace `../venv/bin/python` with your `PYTHON_BIN` if the venv path differs.
 
-- Training in folder e.g. called tus_po_8p_dn19 on e.g. GPU with ID 1 (check `nvidia-smi`)
-    ```
-    cd tus_po_8p_dn19
-    CUDA_VISIBLE_DEVICES="1" python ../yolino/src/yolino/train.py --gpu
-    ```
-- Evaluation in folder e.g. called tus_po_8p_dn19 (https://gitlab.mrt.uni-karlsruhe.de/meyer/dvc_experiment_mgmt) on
-  e.g. CPU (provide GPU IDs if you prefer GPU)
-    ```
-    cd tus_po_8p_dn19
-    CUDA_VISIBLE_DEVICES="" python ../yolino/src/yolino/eval.py
-    ```
+> **Note:** Experiment YAMLs may contain machine-local `dataset_ttpla` paths. Always set `DATASET_TTPLA` or pass `--dataset-root` via `run.sh` when running on a new machine.
 
-## Usage
+---
 
-### Training
+## Project layout
 
-1. Your configuration is set with the given `params.yaml` from your configuration folder. Use `res/default_params.yaml` as inspiration. 
-4. Use proper virtual environment with `workon <virtualenv-name>` or conda with `conda activate <conda-name>`.
-2. Set your dataset paths properly to e.g. `$DATASET_TUSIMPLE`.
-5. `cd tus_po_8p_dn19`
-6. Execute training command on e.g. gpu with ID=1 `CUDA_VISIBLE_DEVICES="1" python ../yolino/src/yolino/train.py --gpu --loggers wb`
-7. Open wandb site to watch your training. Link will be printed to cmd.
+```
+CAPSTONE/
+├── run.sh                          # main training launcher (DDP)
+├── configs/experiments/
+│   ├── exp80_ttpla_512512_scale16.yaml      # Stage 1
+│   └── exp81_gnn_ttpla_512512_from_exp80.yaml  # Stage 2
+├── src/yolino/
+│   ├── train.py                    # training entry
+│   ├── predict.py                  # inference + visualization
+│   ├── eval.py                     # evaluation metrics
+│   └── model/yolino_gnn_head.py    # GNN assembly head
+└── ttpla_train_exp/
+    └── log/checkpoints/            # saved weights (gitignored)
+```
 
-### Visualize Data Loading
+---
 
-1. Your configuration is already set with the given `params.yaml` from your configuration folder.
-4. Use proper virtual environment with `workon <virtualenv-name>` or conda with `conda activate <conda-name>`.
-2. Set your dataset paths properly to e.g. `$DATASET_TUSIMPLE`.
-3. `cd tus_po_8p_dn19`
-4. Execute visualization command for e.g. clips/0313-2/100/20.jpg
-   `python ../yolino/src/yolino/show.py --explicit clips/0313-2/100/20.jpg`. By default all
-   parameters from the params.yaml are taken. You might want to use no augmentation with `--augment ""`. If you wish to
-   skim through the dataset leave the `--explicit` filename. Make sure to have access to the whole dataset or
-   use `--ignore_missing`. With `--max_n` you can limit the number of files loaded.
+## References
 
-### Hyperparameter Tuning
+If you use this code, please cite the original YOLinO paper and the GAT architecture used in our graph head:
 
-Use weights and biases: https://docs.wandb.ai/guides/sweeps
+```bibtex
+@inproceedings{meyer2021yolino,
+  title={YOLinO: Generic Single Shot Polyline Detection in Real Time},
+  author={Meyer, Annika and Skudlik, Philipp and Pauls, Jan-Hendrik and Stiller, Christoph},
+  booktitle={Proceedings of the IEEE/CVF International Conference on Computer Vision Workshops},
+  pages={2916--2925},
+  year={2021}
+}
 
-### Parameter Usage 
-Use `--help` on your preferred script (e.g. `train.py`, `predict.py`, ...).
+@inproceedings{velickovic2018graph,
+  title={Graph Attention Networks},
+  author={Veli{\v{c}}kovi{\'c}, Petar and Cucurull, Guillem and Casanova, Arantxa and Romero, Adriana and Li{\`o}, Pietro and Bengio, Yoshua},
+  booktitle={International Conference on Learning Representations},
+  year={2018}
+}
+```
 
-## Troubleshooting
+**Links**
+- YOLinO (upstream): https://github.com/KIT-MRT/YOLinO
+- Graph Attention Networks: https://arxiv.org/abs/1710.10903
+- TTPLA dataset (original): cite the TTPLA source paper when using the benchmark tiles
 
-- If the tests fail, make sure you have git lfs setup and all files in test/test_data are fetched properly
-- If weights and biases complains about duplicate IDs after deleting some runs online, execute `wandb sync --clean` in
-  your dvc folder and add (temporarily!) `id=wandb.util.generate_id()` to the initializing of your wandb connection. Run
-  it once and delete that again.
-- If installing the packages with pip does not work with conda, try using explicitly the conda pip/python executables in e.g. `<CONDA_HOME>/envs/<env_name>/bin/pip`
+---
+
+## Acknowledgments
+
+This project extends the open-source [YOLinO](https://github.com/KIT-MRT/YOLinO) framework (Karlsruhe Institute of Technology). CAPSTONE-specific changes focus on TTPLA powerline detection with a GNN-based instance assembly stage.
