@@ -213,6 +213,13 @@ ttpla_train_exp/**/checkpoints/
 # Optional local clutter (uncomment if needed)
 # ttpla_train_exp/debug_id_assignment_report.json
 
+# ---- eval_isq / eval_pixel_f1 experiment result caches (code only, no artifacts) ----
+eval_isq/*.pkl
+eval_isq/results/
+eval_pixel_f1/results/
+eval_pixel_f1/viz/
+eval_pixel_f1/viz_*/
+
 # ---- Experiment runtime outputs (TensorBoard, cmd logs, eval artifacts) ----
 
 # TensorBoard (supplement runs/ above)

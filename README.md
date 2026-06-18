@@ -17,30 +17,40 @@
 
 ## Abstract
 
-CAPSTONE detects aerial powerlines in TTPLA imagery using a **two-stage** pipeline. **Stage 1** runs a YOLinO-style single-shot detector (ConvNeXt-Tiny + FPN) to predict per-cell line geometry and confidence. **Stage 2** freezes that backbone and trains a **Graph Attention Network (GAT)** on predicted segments to assemble individual wires into instance-level polylines. Datasets and checkpoints are published on Hugging Face; this repository provides training, inference, and experiment configs.
+CAPSTONE detects aerial powerlines in TTPLA imagery using a **two-stage** pipeline. **Stage 1** runs a YOLinO-style single-shot detector (ConvNeXt-Tiny + FPN) to predict per-cell line geometry and confidence. **Stage 2** freezes that backbone and trains a **Graph Attention Network (GAT)** on predicted segments to assemble individual wires into instance-level polylines. Datasets and checkpoints are published on Hugging Face; this repository provides training, inference, experiment configs, and evaluation code.
 
 ## Model architecture
 
 ![CAPSTONE two-stage architecture: YOLinO geom head + GNN assembly](docs/images/Model_Architecture.png)
 
 **Pipeline**
-- **Stage 1 (`exp80`)** — train YOLinO geometry + confidence (ConvNeXt-Tiny, FPN, 512×512, scale 16 / P3).
-- **Stage 2 (`exp82`)** — freeze the geom backbone and train the GNN post-processor on top of Stage 1 weights (GNN settings from `exp71`).
+- **Stage 1 (`exp80`)** — train YOLinO geometry + confidence (ConvNeXt-Tiny, FPN+PANet, 512×512, scale 16 / P3).
+- **Stage 2 (`exp83`)** — freeze backbone/FPN/geom head; train GNN head with strengthened topology loss (`directional2`, BCE + random-walk).
 
 Large artifacts (dataset & checkpoints) are hosted on [Hugging Face](https://huggingface.co/V8heart); this repo contains code and experiment configs only.
 
-## Results (preview)
+## Results
 
 | Stage | Config | Description |
 |-------|--------|-------------|
-| **Stage 1** | `exp80` | YOLinO geom + confidence (pred \| GT, conf ≥ 0.7) |
-| **Stage 2** | `exp82` | GNN assembly — *coming soon* |
+| **Stage 1** | `exp80` | YOLinO geom + confidence (conf ≥ 0.7) |
+| **Stage 2** | `exp83` | GNN assembly on top of exp80 |
+
+**Quantitative results (TTPLA test set, 220 images)**
+
+| Metric | exp80 (Geom only) | exp83 (+ GNN) | LSNetv2 (reported) |
+|--------|:-----------------:|:-------------:|:------------------:|
+| APR (2 px) | 0.610 | 0.617 | 0.714 |
+| ARR (2 px) | 0.581 | 0.579 | 0.560 |
+| F1  (2 px) | 0.595 | 0.597 | 0.628 |
+| F_β (β²=0.3) | 0.603 | 0.608 | 0.671 |
+| ISQ Precision | 0.354 | 0.361 | — |
+| ISQ Recall    | 0.663 | 0.693 | — |
+| ISQ F1        | 0.455 | 0.469 | — |
 
 **Stage 1 example** (`71_4520`, val split):
 
 ![Stage 1 example — YOLinO geom prediction (left) vs GT (right)](docs/images/stage1_example.png)
-
-**Stage 2 example:** *TBD after `exp82` training completes.*
 
 ---
 
@@ -75,8 +85,8 @@ export PYTHON_BIN=/path/to/venv/bin/python
 ## Quick start
 
 ```bash
-git clone https://github.com/V8heart/CAPSTONE.git
-cd CAPSTONE
+git clone https://github.com/viewlab-group/Capstone26s-PowerLineDetection-dev.git
+cd Capstone26s-PowerLineDetection-dev
 source /path/to/venv/bin/activate   # or set PYTHON_BIN
 pip install -e .
 pip install -U huggingface_hub
@@ -90,9 +100,9 @@ export DATASET_TTPLA="$(pwd)/YOLinO_benchmark"
 
 # optional: download Stage 2 checkpoint for inference
 hf download V8heart/CAPSTONE-gnn-weights \
-  exp81_gnn_ttpla_512512_from_exp80/ep0058_model.pth \
+  exp83_gnn_ttpla_512512_from_exp80/ep0006_model.pth \
   --repo-type model \
-  --local-dir ttpla_train_exp/log/checkpoints/exp81_gnn_ttpla_512512_from_exp80
+  --local-dir ttpla_train_exp/log/checkpoints/exp83_gnn_ttpla_512512_from_exp80
 ```
 
 Expected dataset layout:
@@ -106,7 +116,7 @@ YOLinO_benchmark/
 | Resource | Hugging Face | Status |
 |----------|--------------|--------|
 | TTPLA benchmark (512×512) | [V8heart/yolino-ttpla-benchmark](https://huggingface.co/datasets/V8heart/yolino-ttpla-benchmark) | Available |
-| Stage 2 checkpoint (`exp81`, ep58) | [V8heart/CAPSTONE-gnn-weights](https://huggingface.co/V8heart/CAPSTONE-gnn-weights) | Available |
+| Stage 2 checkpoint (`exp83`, ep6) | [V8heart/CAPSTONE-gnn-weights](https://huggingface.co/V8heart/CAPSTONE-gnn-weights) | Available |
 
 ---
 
@@ -135,46 +145,33 @@ bash run.sh \
   --nproc 4
 ```
 
-### Stage 2 — GNN head (`exp82`)
+### Stage 2 — GNN head (`exp83`)
 
-Config: `configs/experiments/exp82_gnn_ttpla_512512_from_exp80.yaml`
+Config: `configs/experiments/exp83_gnn_ttpla_512512_from_exp80.yaml`
 
-Warm-starts from Stage 1 `best_model.pth` (`explicit_model` in the YAML). Backbone/geom/FPN are frozen; only the GNN (`e2e_mode: gnn`) is trained. GNN hyperparameters follow `exp71` (`directional2`, BCE edge loss).
+Warm-starts from Stage 1 `best_model.pth` (`explicit_model` in the YAML). Backbone/FPN/geom are **frozen** (`lr=0.0`); only the GNN head (`e2e_mode: gnn`) is trained.
+
+Key hyperparameters vs. baseline GNN (exp82):
+- `gnn_pos_weight: 4.0` (↑ from 2.0) — stronger positive edge signal
+- `gnn_rw_topology_weight: 0.35` (↑ from 0.1) — stronger random-walk regularisation
+- `gnn_rw_steps: 8` (↑ from 6) — longer chain connectivity
+- `gnn_cc_edge_thresh: 0.2` (↓ from 0.3) — more segments connected at inference
 
 ```bash
 # requires Stage 1 checkpoint at:
 # ttpla_train_exp/log/checkpoints/exp80_ttpla_512512_scale16/best_model.pth
 
 bash run.sh \
-  --config configs/experiments/exp82_gnn_ttpla_512512_from_exp80.yaml \
+  --config configs/experiments/exp83_gnn_ttpla_512512_from_exp80.yaml \
   --dataset-root "$DATASET_TTPLA" \
   --nproc 3
-```
-
-> Previous Stage 2 experiment: `exp81_gnn_ttpla_512512_from_exp80.yaml` (directional2_ctx + cross_ignore loss).
-
-### Download checkpoint (skip training)
-
-Published on Hugging Face — Stage 2 only (`exp81`, epoch 58):
-
-```bash
-hf download V8heart/CAPSTONE-gnn-weights \
-  exp81_gnn_ttpla_512512_from_exp80/ep0058_model.pth \
-  --repo-type model \
-  --local-dir ttpla_train_exp/log/checkpoints/exp81_gnn_ttpla_512512_from_exp80
-```
-
-This places the file at:
-
-```
-ttpla_train_exp/log/checkpoints/exp81_gnn_ttpla_512512_from_exp80/ep0058_model.pth
 ```
 
 ---
 
 ## Inference & evaluation
 
-Run from `ttpla_train_exp/` with the project venv. Use the **Stage 2** config and checkpoint for full GNN assembly.
+Run from the project root with the venv active.
 
 ### Visual prediction (overlay images)
 
@@ -184,18 +181,18 @@ export DATASET_TTPLA="../YOLinO_benchmark"
 export PYTHONPATH="../src"
 
 ../venv/bin/python ../src/yolino/predict.py \
-  -c ../configs/experiments/exp81_gnn_ttpla_512512_from_exp80.yaml \
+  -c ../configs/experiments/exp83_gnn_ttpla_512512_from_exp80.yaml \
   --root .. \
   --dvc . \
   --log_dir ttpla_experiments \
   --split val \
   --gpu \
-  --explicit_model log/checkpoints/exp81_gnn_ttpla_512512_from_exp80/ep0058_model.pth
+  --explicit_model log/checkpoints/exp83_gnn_ttpla_512512_from_exp80/ep0006_model.pth
 ```
 
 Debug images are written under `ttpla_train_exp/debug/prediction/`.
 
-### Metric evaluation
+### Built-in metric evaluation
 
 ```bash
 cd ttpla_train_exp
@@ -203,13 +200,13 @@ export DATASET_TTPLA="../YOLinO_benchmark"
 export PYTHONPATH="../src"
 
 ../venv/bin/python ../src/yolino/eval.py \
-  -c ../configs/experiments/exp81_gnn_ttpla_512512_from_exp80.yaml \
+  -c ../configs/experiments/exp83_gnn_ttpla_512512_from_exp80.yaml \
   --root .. \
   --dvc . \
   --log_dir ttpla_experiments \
   --split val \
   --gpu \
-  --explicit_model log/checkpoints/exp81_gnn_ttpla_512512_from_exp80/ep0058_model.pth
+  --explicit_model log/checkpoints/exp83_gnn_ttpla_512512_from_exp80/ep0006_model.pth
 ```
 
 Replace `../venv/bin/python` with your `PYTHON_BIN` if the venv path differs.
@@ -218,22 +215,124 @@ Replace `../venv/bin/python` with your `PYTHON_BIN` if the venv path differs.
 
 ---
 
+## Evaluation Metrics
+
+This repository includes two standalone evaluation modules under `eval_isq/` and `eval_pixel_f1/`.
+
+### ISQ — Instance Segmentation Quality (`eval_isq/`)
+
+ISQ is a **proposed segment-level metric** that explicitly accounts for instance identity (polyline ID), over-splitting, and under-merging. Unlike pixel-level metrics, it operates at the level of predicted *polyline instances* and measures how faithfully the model recovers individual wire identities.
+
+**Key files:**
+
+| File | Description |
+|------|-------------|
+| `isq_core.py` | Core ISQ computation: GT segment generation, pred-to-GT matching, TP/FP/FN counting, OS/UM rate |
+| `eval_isq.py` | Evaluation runner: loads predictions (pkl) and runs ISQ over a dataset split |
+| `validate_isq.py` | Validation harness: sanity test, controlled OS/UM test, monotonicity test |
+| `quick_compare.py` | Side-by-side ISQ comparison across multiple experiments |
+| `smoke_fitlines.py` | Smoke test for fitlines-based polyline grouping |
+| `analyze_isq_recall.py` | Per-image ISQ recall analysis |
+| `run_oversplit_eval.py` | Evaluate over-split rate under controlled perturbations |
+
+**Algorithm (3-step):**
+
+1. **GT segment generation** — each GT polyline is intersected with a 32×32 px grid; at most one segment per (cell, polyline) pair.
+2. **Matching** — each predicted segment is matched to the closest GT segment within distance < 24 px **and** angle difference < 15°. The dominant GT polyline ID is the majority-vote among matched GT IDs.
+3. **TP/FP/FN** — a GT segment counts as TP at most once; any re-match is FP. FN = unmatched GT segments.
+
+**OS / UM rates:**
+- **Over-split (OS):** ≥ 2 predicted polylines each cover ≥ 30% of the same GT polyline.
+- **Under-merge (UM):** a single predicted polyline meaningfully covers ≥ 2 distinct GT polylines (precision or recall ≥ 30% against each).
+
+**Usage:**
+
+```bash
+cd eval_isq
+export PYTHONPATH="../src"   # needs yolino.postprocessing for fitlines
+
+# run ISQ on a saved prediction pickle
+python eval_isq.py \
+  --geom-pkl pred_geom_exp80_512_test.pkl \
+  --gnn-pkl  pred_gnn_exp83_ep6_512_test.pkl \
+  --dataset-root /path/to/YOLinO_benchmark \
+  --split test
+
+# run validation tests (sanity / controlled / monotonicity)
+python validate_isq.py
+```
+
+---
+
+### Pixel F1 — LSNetv2-style Raster Metrics (`eval_pixel_f1/`)
+
+Pixel-level evaluation following the **LSNetv2** protocol: both GT polylines and predictions are rasterised to binary masks at a fixed line width, and macro-averaged precision / recall / F1 / F_β (β²=0.3) are reported over all images.
+
+**Key files:**
+
+| File | Description |
+|------|-------------|
+| `eval_pixel_f1.py` | Main evaluation: rasterisation, per-image PR, macro APR/ARR/F1/F_β, relaxation sweep |
+| `run_exp80_geom_full_metrics.py` | Runner script for exp80 (geom) and exp83 (GNN) on the full test set |
+| `viz_exp80_raw_vs_cc.py` | Visualise raw geom vs. CC-assembled predictions side-by-side |
+| `viz_exp80_raw_vs_cc192.py` | Same with adjacency threshold 192 px |
+
+**Protocol:**
+
+- **GT type:** GT-B (polyline raster, thin wire centre lines)
+- **Line widths evaluated:** 2 px and 4 px (LSNetv2 standard)
+- **Metric:** macro APR / ARR / F1 / F_β (β²=0.3), averaged over images
+
+```
+F_β = (1 + β²) · APR · ARR / (β² · APR + ARR),   β² = 0.3
+```
+
+**Usage:**
+
+```bash
+cd eval_pixel_f1
+export PYTHONPATH="../src"
+export DATASET_TTPLA="/path/to/YOLinO_benchmark"
+
+# run full metrics for exp80 + exp83
+python run_exp80_geom_full_metrics.py \
+  --geom-config ../configs/experiments/exp80_ttpla_512512_scale16.yaml \
+  --gnn-config  ../configs/experiments/exp83_gnn_ttpla_512512_from_exp80.yaml \
+  --geom-ckpt   ../ttpla_train_exp/log/checkpoints/exp80_ttpla_512512_scale16/best_model.pth \
+  --gnn-ckpt    ../ttpla_train_exp/log/checkpoints/exp83_gnn_ttpla_512512_from_exp80/ep0006_model.pth \
+  --split test --gpu
+```
+
+---
+
 ## Project layout
 
 ```
 CAPSTONE/
-├── run.sh                          # main training launcher (DDP)
+├── run.sh                              # main training launcher (DDP)
 ├── configs/experiments/
-│   ├── exp80_ttpla_512512_scale16.yaml      # Stage 1
-│   ├── exp81_gnn_ttpla_512512_from_exp80.yaml  # Stage 2 (prev.)
-│   └── exp82_gnn_ttpla_512512_from_exp80.yaml  # Stage 2 (current)
+│   ├── exp80_ttpla_512512_scale16.yaml           # Stage 1 (geom)
+│   ├── exp83_gnn_ttpla_512512_from_exp80.yaml    # Stage 2 (GNN, used)
+│   └── exp82_gnn_ttpla_512512_from_exp80.yaml    # Stage 2 (prev.)
 ├── src/yolino/
-│   ├── train.py                    # training entry
-│   ├── predict.py                  # inference + visualization
-│   ├── eval.py                     # evaluation metrics
-│   └── model/yolino_gnn_head.py    # GNN assembly head
+│   ├── train.py                        # training entry
+│   ├── predict.py                      # inference + visualisation
+│   ├── eval.py                         # built-in evaluation
+│   ├── dataset/ttpla.py                # TTPLA dataset loader
+│   ├── dataset/augmentation.py         # data augmentation pipeline
+│   ├── model/yolino_net.py             # ConvNeXt + FPN + geom head
+│   ├── model/yolino_gnn_head.py        # GAT-based GNN head
+│   ├── model/optimizer_factory.py      # LR groups + cosine scheduler
+│   └── model/gnn_topology_loss.py      # random-walk topology loss
+├── eval_isq/
+│   ├── isq_core.py                     # ISQ metric (matching, TP/FP/FN, OS/UM)
+│   ├── eval_isq.py                     # ISQ evaluation runner
+│   └── validate_isq.py                 # ISQ validation harness
+├── eval_pixel_f1/
+│   ├── eval_pixel_f1.py                # Pixel F1 / LSNetv2-style metrics
+│   └── run_exp80_geom_full_metrics.py  # runner for exp80 + exp83
 └── ttpla_train_exp/
-    └── log/checkpoints/            # saved weights (gitignored)
+    └── log/checkpoints/                # saved weights (gitignored)
 ```
 
 ---
