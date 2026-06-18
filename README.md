@@ -228,12 +228,7 @@ ISQ is a **proposed segment-level metric** that explicitly accounts for instance
 | File | Description |
 |------|-------------|
 | `isq_core.py` | Core ISQ computation: GT segment generation, pred-to-GT matching, TP/FP/FN counting, OS/UM rate |
-| `eval_isq.py` | Evaluation runner: loads predictions (pkl) and runs ISQ over a dataset split |
-| `validate_isq.py` | Validation harness: sanity test, controlled OS/UM test, monotonicity test |
-| `quick_compare.py` | Side-by-side ISQ comparison across multiple experiments |
-| `smoke_fitlines.py` | Smoke test for fitlines-based polyline grouping |
-| `analyze_isq_recall.py` | Per-image ISQ recall analysis |
-| `run_oversplit_eval.py` | Evaluate over-split rate under controlled perturbations |
+| `eval_isq.py` | Evaluation runner: runs inference and ISQ over a dataset split |
 
 **Algorithm (3-step):**
 
@@ -249,17 +244,15 @@ ISQ is a **proposed segment-level metric** that explicitly accounts for instance
 
 ```bash
 cd eval_isq
-export PYTHONPATH="../src"   # needs yolino.postprocessing for fitlines
+export PYTHONPATH="../src"
+export DATASET_TTPLA="/path/to/YOLinO_benchmark"
 
-# run ISQ on a saved prediction pickle
 python eval_isq.py \
-  --geom-pkl pred_geom_exp80_512_test.pkl \
-  --gnn-pkl  pred_gnn_exp83_ep6_512_test.pkl \
-  --dataset-root /path/to/YOLinO_benchmark \
-  --split test
-
-# run validation tests (sanity / controlled / monotonicity)
-python validate_isq.py
+  --geom-config ../configs/experiments/exp80_ttpla_512512_scale16.yaml \
+  --gnn-config  ../configs/experiments/exp83_gnn_ttpla_512512_from_exp80.yaml \
+  --geom-ckpt   ../ttpla_train_exp/log/checkpoints/exp80_ttpla_512512_scale16/best_model.pth \
+  --gnn-ckpt    ../ttpla_train_exp/log/checkpoints/exp83_gnn_ttpla_512512_from_exp80/ep0006_model.pth \
+  --split test --gpu
 ```
 
 ---
@@ -272,10 +265,7 @@ Pixel-level evaluation following the **LSNetv2** protocol: both GT polylines and
 
 | File | Description |
 |------|-------------|
-| `eval_pixel_f1.py` | Main evaluation: rasterisation, per-image PR, macro APR/ARR/F1/F_β, relaxation sweep |
-| `run_exp80_geom_full_metrics.py` | Runner script for exp80 (geom) and exp83 (GNN) on the full test set |
-| `viz_exp80_raw_vs_cc.py` | Visualise raw geom vs. CC-assembled predictions side-by-side |
-| `viz_exp80_raw_vs_cc192.py` | Same with adjacency threshold 192 px |
+| `eval_pixel_f1.py` | Main evaluation: rasterisation, per-image PR, macro APR/ARR/F1/F_β |
 
 **Protocol:**
 
@@ -294,8 +284,7 @@ cd eval_pixel_f1
 export PYTHONPATH="../src"
 export DATASET_TTPLA="/path/to/YOLinO_benchmark"
 
-# run full metrics for exp80 + exp83
-python run_exp80_geom_full_metrics.py \
+python eval_pixel_f1.py \
   --geom-config ../configs/experiments/exp80_ttpla_512512_scale16.yaml \
   --gnn-config  ../configs/experiments/exp83_gnn_ttpla_512512_from_exp80.yaml \
   --geom-ckpt   ../ttpla_train_exp/log/checkpoints/exp80_ttpla_512512_scale16/best_model.pth \
@@ -326,11 +315,9 @@ CAPSTONE/
 │   └── model/gnn_topology_loss.py      # random-walk topology loss
 ├── eval_isq/
 │   ├── isq_core.py                     # ISQ metric (matching, TP/FP/FN, OS/UM)
-│   ├── eval_isq.py                     # ISQ evaluation runner
-│   └── validate_isq.py                 # ISQ validation harness
+│   └── eval_isq.py                     # ISQ evaluation runner
 ├── eval_pixel_f1/
-│   ├── eval_pixel_f1.py                # Pixel F1 / LSNetv2-style metrics
-│   └── run_exp80_geom_full_metrics.py  # runner for exp80 + exp83
+│   └── eval_pixel_f1.py                # Pixel F1 / LSNetv2-style metrics
 └── ttpla_train_exp/
     └── log/checkpoints/                # saved weights (gitignored)
 ```
