@@ -1,0 +1,1590 @@
+%% CAPSTONE Implementation Report
+%% Powerline Detection with YOLinO + GNN
+%% 코드 구현 명세 및 실험 환경 보고서
+%%
+%% Compile: pdflatex → bibtex → pdflatex × 2
+%%
+\documentclass[11pt,a4paper]{article}
+
+%% ---- Packages ----
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{geometry}
+\geometry{left=25mm, right=25mm, top=25mm, bottom=25mm}
+
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+\usepackage{listings}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+
+%% ---- Code Listing Style ----
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.97,0.97,0.97}
+\definecolor{keywordcolor}{rgb}{0.0,0.3,0.7}
+
+\lstdefinestyle{pythonstyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegray}\itshape,
+    keywordstyle=\color{keywordcolor}\bfseries,
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2,
+    language=Python,
+    frame=single,
+    framerule=0.4pt,
+    rulecolor=\color{black!30},
+}
+\lstset{style=pythonstyle}
+
+%% ---- Header/Footer ----
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small CAPSTONE: Powerline Detection with YOLinO + GNN}
+\rhead{\small Implementation Report}
+\cfoot{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+%% ============================================================
+\begin{document}
+
+\begin{titlepage}
+  \centering
+  \vspace*{2cm}
+  {\LARGE \bfseries CAPSTONE: Powerline Detection with YOLinO + GNN\\[0.5em]}
+  {\large \textit{Implementation Report --- Code Specification \& Experimental Environment}}\\[2em]
+  \rule{\linewidth}{0.5pt}\\[1em]
+  {\large Dataset, Preprocessing, Model Architecture, Training, Evaluation Metrics,\\
+          Inference, and Ablation Studies}\\[1em]
+  \rule{\linewidth}{0.5pt}\\[3em]
+  {\large GitHub: \url{https://github.com/V8heart/CAPSTONE}}\\[0.5em]
+  {\large Hugging Face: \url{https://huggingface.co/V8heart}}\\[3em]
+  \vfill
+  {\normalsize \today}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%% ============================================================
+\section{Dataset and Preprocessing}
+\label{sec:dataset}
+
+%% ----
+\subsection{TTPLA Dataset}
+\label{subsec:ttpla}
+
+The \textbf{TTPLA} (Transmission Tower and Power Line Aerial) dataset is the primary
+benchmark used in this work. Its key statistics are as follows:
+
+\begin{table}[H]
+\centering
+\caption{TTPLA dataset summary}
+\begin{tabular}{ll}
+\toprule
+Property & Value \\
+\midrule
+Total images & 1,234 \\
+Native resolution & 3840 $\times$ 2160 (4K UHD) \\
+Instance annotations & 8,987 powerline instances \\
+Annotation type & Polyline (vertex chain per wire) \\
+Working resolution & 512 $\times$ 512 (tiled from 4K) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The original 4K frames are preprocessed into $512 \times 512$ square crops via a
+\emph{dual-crop} strategy (L/R or T/B depending on aspect ratio).
+The processed benchmark is published on Hugging Face as
+\texttt{V8heart/yolino-ttpla-benchmark} and is accessed via the
+\texttt{DATASET\_TTPLA} environment variable.
+
+Expected directory layout (set via \texttt{DATASET\_TTPLA}):
+\begin{lstlisting}[language=bash, numbers=none, frame=none, backgroundcolor=\color{white}]
+YOLinO_benchmark/
+  images/{train,val,test}/*.png
+  labels/{train,val,test}/*.npy     # polyline vertices per image
+\end{lstlisting}
+
+\subsubsection{1024$\times$1024 Ablation Tiles}
+\label{subsec:ttpla_1024}
+
+For backbone / predictor-count ablations (exp05--exp19) and full-resolution ISQ
+evaluation, TTPLA is additionally tiled to $1024 \times 1024$ using the dual-crop
+pipeline in \texttt{scripts/build\_ttpla\_style\_dataset.py}
+(depends on \texttt{scripts/build\_downsampled\_yolino\_dataset.py}).
+The processed dataset is published on Hugging Face as
+\texttt{V8heart/ttpla-yolino-1024}.
+
+\begin{table}[H]
+\centering
+\caption{TTPLA $1024 \times 1024$ tile split}
+\begin{tabular}{lrr}
+\toprule
+Split & Images & Use \\
+\midrule
+train & 1,810 & Ablation training (50 epochs) \\
+val   &   218 & Validation / FPS benchmark \\
+test  &   440 & ISQ full-test evaluation \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{lstlisting}[language=bash, numbers=none]
+# Build 1024^2 tiles from CVAT XML (example)
+python scripts/build_ttpla_style_dataset.py cvat-xml \
+  --cvat-xml /path/to/annotations.xml \
+  --image-dir /path/to/images \
+  --guide-dir data_guide \
+  --output-root ttpla_yolino_dataset_1024x1024 \
+  --target-width 1024
+
+# Download pre-built tiles
+hf download V8heart/ttpla-yolino-1024 \
+  --repo-type dataset \
+  --local-dir ./ttpla_yolino_dataset_1024x1024
+\end{lstlisting}
+
+\subsubsection{Why TTPLA was Chosen}
+Several candidate datasets were evaluated:
+
+\begin{table}[H]
+\centering
+\caption{Candidate dataset comparison}
+\begin{tabular}{lcccl}
+\toprule
+Dataset & Images & Resolution & Annotation & Decision \\
+\midrule
+\textbf{TTPLA} & 1,234 & 3840$\times$2160 & Polyline & \textbf{Selected} \\
+Powerline IR/VL & $\sim$100 & $\leq$1080p & Bounding box & Insufficient scale \\
+PLD-UAV & $\sim$9,000 & $\sim$1080p & Bounding box & No polyline GT \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+TTPLA was selected because it provides (1) the largest publicly available 4K aerial
+powerline dataset with per-instance \emph{polyline} annotations, (2) scene diversity
+across 110+ locations, and (3) compatibility with the YOLinO grid regression framework.
+
+\subsection{KEPCO Dataset}
+\label{subsec:kepco}
+
+In addition to TTPLA, a proprietary \textbf{KEPCO} (Korea Electric Power Corporation)
+dataset is used for cross-domain evaluation (experiments exp71--exp75).
+
+\subsubsection{Dataset Construction}
+Raw footage from two field sources (minidata 001 and 002-part1) is
+annotated in CVAT XML format and converted to the TTPLA-compatible
+\texttt{\{images,labels\}/\{train,val,test\}} layout by
+\texttt{scripts/prepare\_kepco\_yolino.py}
+(uses \texttt{scripts/build\_downsampled\_yolino\_dataset.py}):
+
+\begin{lstlisting}
+# prepare_kepco_yolino.py (key pipeline)
+crops = convert_cvat_dual_square_crops(
+    polys_meta, img_path,
+    target=target_width,   # 1024 px per side
+    min_points=min_points
+)
+for tag, resized, polylines, instance_ids, tw, th in crops:
+    stub = f"{b}_{tag}"          # e.g. "img001_L"
+    resized.save(out_img)
+    payload = {"polylines": polylines, "instance_ids": instance_ids}
+    np.save(out_npy, payload)
+\end{lstlisting}
+
+The dual-crop strategy generates two $1024 \times 1024$ crops (left/right or top/bottom)
+per source image, doubling effective dataset size while keeping annotations in the same
+coordinate system as TTPLA.
+The dataset split is guided by text files in \texttt{data\_guide/\{train,val,test\}.txt};
+the final split is approximately 80:20 train/val.
+The processed KEPCO benchmark is published on Hugging Face as
+\texttt{V8heart/Yolino-KEPCO} with the same
+\texttt{\{images,labels\}/\{train,val\}} layout used for exp23 (geom) and exp71 (GNN)
+cross-domain evaluation.
+
+\subsection{Label Format and Loading}
+\label{subsec:label_loading}
+
+Each \texttt{.npy} label supports two formats, both parsed in
+\texttt{src/yolino/dataset/ttpla.py}:
+
+\begin{lstlisting}
+# ttpla.py -- TTPLADataset.__get_labels__()
+raw = np.load(self.label_files[idx], allow_pickle=True)
+payload = raw.item() if (isinstance(raw, np.ndarray)
+                         and raw.dtype == object
+                         and raw.shape == ()) else raw
+
+if isinstance(payload, dict):
+    # New format: {"instances": [{"instance_id":..., "points":...}, ...]}
+    # or {"polylines": [...], "instance_ids": [...]}
+    ...
+else:
+    # Legacy: raw list of polylines (fallback IDs 1..N)
+    for p in payload:
+        polylines.append(p)
+        instance_ids.append(len(instance_ids) + 1)
+\end{lstlisting}
+
+Points are stored as $(x, y)$ in the file but converted to $(y, x)$ (row, col)
+convention internally for the YOLinO grid pipeline. Each wire is sorted so that
+$x_{\text{start}} \le x_{\text{end}}$ (left-to-right canonical order):
+
+\begin{lstlisting}
+# Canonical left-to-right ordering
+if poly_np[0, 0] > poly_np[-1, 0]:   # x-coord of first vs last point
+    poly_np = poly_np[::-1]
+for j, pt in enumerate(poly_np):
+    x, y = pt
+    gridable_lines[i, j, 0] = float(y)   # row
+    gridable_lines[i, j, 1] = float(x)   # col
+\end{lstlisting}
+
+\subsection{Z-Score Normalisation}
+\label{subsec:normalization}
+
+Images are normalised using \textbf{ImageNet} mean/std (ConvNeXt-Tiny pretrained values):
+
+\[
+\mu = [0.485,\; 0.456,\; 0.406], \quad
+\sigma = [0.229,\; 0.224,\; 0.225]
+\]
+
+The normalisation is implemented as \texttt{torchvision.transforms.Normalize} and is
+inserted automatically when \texttt{backbone\_pretrained: True} in the YAML config:
+
+\begin{lstlisting}
+# augmentation.py -- DatasetTransformer.__init__()
+self.norm_mean = [0.485, 0.456, 0.406]
+self.norm_std  = [0.229, 0.224, 0.225]
+...
+if getattr(args, "backbone_pretrained", False) \
+        and Augmentation.NORM not in self.methods:
+    self.methods.append(Augmentation.NORM)
+    Log.info("Auto-enabled augmentation 'normalize' for "
+             "pretrained ConvNeXt backbone (ImageNet mean/std).")
+\end{lstlisting}
+
+\subsection{Data Augmentation}
+\label{subsec:augmentation}
+
+Four augmentation types are applied during training, activated via the YAML key
+\texttt{augment: crop,rotation,jitter,erasing} in
+\texttt{exp80\_ttpla\_512512\_scale16.yaml}.
+All augmentations are implemented in \texttt{src/yolino/dataset/augmentation.py}.
+
+\begin{table}[H]
+\centering
+\caption{Data augmentation summary}
+\begin{tabular}{llp{7cm}}
+\toprule
+Augmentation & Class & Parameters \\
+\midrule
+Random Crop &
+  \texttt{RandomCropWithLabels} &
+  Crop ratio from $[\texttt{crop\_range},\, 1.0]$;
+  labels intersected with crop box via Shapely geometry.
+  \texttt{crop\_range} controls minimum retained fraction. \\[4pt]
+Random Erasing &
+  \texttt{torchvision.transforms.RandomErasing} &
+  $p=0.2$, scale $(0.02, 0.05)$, ratio $(0.15, 2.5)$, value=random. \\[4pt]
+Random Rotation &
+  \texttt{RandomRotationWithLabels} &
+  Angle range $\pm$\texttt{rotation\_range} (radians$\to$degrees);
+  points rotated via polar-coordinate transform around image centre. \\[4pt]
+Color Jitter &
+  \texttt{torchvision.transforms.ColorJitter} &
+  brightness $0.5$, contrast $0.5$, saturation $0.5$, hue $0.2$. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The crop/rotation transforms apply geometric transforms to label polylines
+(not just images), ensuring pixel-accurate correspondences:
+
+\begin{lstlisting}
+# RandomRotationWithLabels.forward()
+angle = RandomRotation.get_params(self.degrees)
+image = F.rotate(image, angle)
+for i_idx, instance in enumerate(uv_lines):
+    for p_idx, point in enumerate(instance):
+        point[0] -= h / 2;  point[1] -= w / 2
+        pol = t_cart2pol(point)
+        pol[1] += math.radians(angle)     # rotate angle
+        point = t_pol2cart(pol)
+        point[0] += h / 2;  point[1] += w / 2
+        uv_lines[i_idx, p_idx] = point
+params["rrotate_angle"] = angle
+\end{lstlisting}
+
+%% ============================================================
+\section{Model Architecture}
+\label{sec:model}
+
+\subsection{Overall Pipeline}
+\label{subsec:pipeline}
+
+The system is a two-stage pipeline:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Stage 1 (Geometry Head)} --- Input image $\to$ ConvNeXt-Tiny backbone $\to$
+        FPN + PANet Neck $\to$ Geometry Head $\to$ per-cell line segment predictions.
+  \item \textbf{Stage 2 (GAT Head)} --- Top-$K$ high-confidence segments form a graph;
+        Graph Attention Network (GAT) predicts edge connectivity; connected components
+        yield instance-level polylines.
+\end{enumerate}
+
+\subsection{Backbone: ConvNeXt-Tiny}
+\label{subsec:backbone}
+
+The backbone is \textbf{ConvNeXt-Tiny} (torchvision), loaded with
+\texttt{ConvNeXt\_Tiny\_Weights.DEFAULT} (ImageNet-1K pretrained).
+Feature extractor node mapping:
+
+\begin{table}[H]
+\centering
+\caption{ConvNeXt-Tiny stage layout and FPN feature tap points}
+\begin{tabular}{llll}
+\toprule
+Torchvision node & Stage & Stride & Channels \\
+\midrule
+\texttt{features.3} (stage2 blocks) & C2 & $\times 8$  & 192 \\
+\texttt{features.5} (stage3 blocks) & C3 & $\times 16$ & 384 \\
+\texttt{features.7} (stage4 blocks) & C4 & $\times 32$ & 768 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{lstlisting}
+# yolino_net.py -- ConvNeXt_FPN_Backbone.__init__()
+if _HAS_NEW_TV_API:
+    weights = ConvNeXt_Tiny_Weights.DEFAULT if pretrained else None
+    base = convnext_tiny(weights=weights)
+else:
+    base = convnext_tiny(pretrained=pretrained)
+self.body = create_feature_extractor(
+    base, return_nodes=OrderedDict([
+        ("features.3", "C2"),
+        ("features.5", "C3"),
+        ("features.7", "C4"),
+    ])
+)
+\end{lstlisting}
+
+\subsection{Neck: FPN + PANet (Bottom-Up Path)}
+\label{subsec:fpn}
+
+The neck combines a top-down FPN with a PANet-style bottom-up path.
+All FPN levels use 256 output channels, group normalisation (32 groups),
+and Kaiming-initialised lateral and smooth convolutions.
+
+\subsubsection{Top-Down FPN}
+
+\[
+M_4 = \text{Conv}_{1\times1}(C_4),\quad
+M_3 = \text{Conv}_{1\times1}(C_3) + \text{Upsample}(M_4),\quad
+M_2 = \text{Conv}_{1\times1}(C_2) + \text{Upsample}(M_3)
+\]
+\[
+P_3 = \text{GN}(\text{Conv}_{3\times3}(M_3)),\quad
+P_2 = \text{GN}(\text{Conv}_{3\times3}(M_2))
+\]
+
+\subsubsection{Bottom-Up Fusion (PANet)}
+
+\[
+N_3 = \text{GN}\!\left(\text{Conv}_{3\times3}\!\left(\text{stride2}(P_2) + M_3\right)\right),\quad
+P_4^{\text{BU}} = \text{GN}\!\left(\text{Conv}_{3\times3}\!\left(\text{stride2}(N_3) + M_4\right)\right)
+\]
+
+\begin{lstlisting}
+# yolino_net.py -- ConvNeXt_FPN_Backbone.forward()
+feats = self.body(x)
+c2, c3, c4 = feats["C2"], feats["C3"], feats["C4"]
+m4 = self.lateral_c4(c4)
+m3 = self.lateral_c3(c3) + self._upsample_to(m4, c3.shape[-2:])
+m2 = self.lateral_c2(c2) + self._upsample_to(m3, c2.shape[-2:])
+p3 = self.smooth_norm_p3(self.smooth_p3(m3))
+p2 = self.smooth_norm_p2(self.smooth_p2(m2))
+# Bottom-up path (PANet)
+if self.bottom_up is not None:
+    p4 = self.bottom_up(p2, m3, m4)
+return {"P2": p2, "P3": p3, "P4": p4}
+\end{lstlisting}
+
+For the final model (exp80/exp83), the geometry head operates on
+\textbf{P3} (stride $\times16$, scale=16) at resolution $32 \times 32$
+for a $512 \times 512$ input.
+
+\subsection{Geometry Head}
+\label{subsec:geom_head}
+
+\subsubsection{Grid Decomposition}
+
+The input image is divided into a regular grid.
+Each grid cell predicts multiple line segments independently:
+
+\begin{table}[H]
+\centering
+\caption{Grid head hyperparameters (exp80)}
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+Input resolution & $512 \times 512$ \\
+Feature level & P3 (stride $\times 16$) \\
+Cell size (scale) & $16 \times 16$ pixels (scale=16) \\
+Grid shape & $32 \times 32$ cells \\
+Predictors per cell & 4 \\
+Training variables & \texttt{geom}, \texttt{confidence} \\
+Activations & \texttt{linear} (geom), \texttt{sigmoid} (conf) \\
+Confidence threshold & 0.7 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Predictor Count Ablation}
+
+The baseline (exp01/Darknet) uses \textbf{8 predictors} per cell.
+Ablation experiment exp19 reduces this to \textbf{4 predictors}:
+
+\begin{lstlisting}
+# exp19_fpn_bottomup_p4_num_predictors4_1024.yaml
+# exp19: exp10 baseline + predictor 8 -> 4 ablation.
+# Hypothesis: 4 predictors are sufficient to cover the max wires per cell.
+num_predictors: 4
+\end{lstlisting}
+
+The 4-predictor setting is retained in all final experiments (exp80, exp83)
+as it achieves equivalent performance with lower computation.
+
+\subsubsection{Confidence Thresholding}
+
+After the sigmoid activation, cells with confidence $< 0.7$ are suppressed:
+
+\begin{lstlisting}
+# exp80_ttpla_512512_scale16.yaml
+confidence: 0.5   # training matching threshold
+# exp83 inference threshold (isq_core.py)
+GEOM_CONF = 0.7   # post-processing confidence gate
+\end{lstlisting}
+
+\subsection{GAT Head (Stage 2)}
+\label{subsec:gat_head}
+
+\subsubsection{Segment-to-Node Conversion}
+
+High-confidence geometry cell predictions are treated as \emph{nodes} in a graph.
+The top-$K$ ($K = 384$) segments (ranked by confidence) are selected:
+
+\begin{lstlisting}
+# exp83_gnn_ttpla_512512_from_exp80.yaml
+gnn_max_nodes: 384          # top-K segment cap
+gnn_node_conf_thresh: 0.1   # pre-NMS node gate
+\end{lstlisting}
+
+Each node is initialised from its mid-direction geometry token
+augmented with sinusoidal positional encoding and (optionally) visual FPN features.
+
+\subsubsection{Edge Attention (GAT)}
+
+The GAT head operates on the \textbf{directional2} adjacency mode:
+for each node, at most $K_{\text{dir}} = 8$ directed neighbours
+(forward/backward along segment direction) are considered as edge candidates.
+Geometric constraints filter edges:
+
+\begin{table}[H]
+\centering
+\caption{Geometric edge prior hyperparameters (exp83)}
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+Max lateral distance & 5.0 px (symmetric) \\
+Max along-line gap & 128.0 px \\
+Max endpoint gap & 40.0 px \\
+Min direction dot product & 0.96 \\
+Min separation & 8.0 px \\
+Directional neighbours $K$ & 8 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The attention weight $e_{ij}$ between node $i$ and neighbour $j$ is computed as:
+
+\[
+e_{ij} = \frac{1}{\sqrt{d_h}} \mathbf{q}_i \cdot \mathbf{k}_j + b_{ij}^{\text{geom}}
+\]
+
+where $\mathbf{q}_i, \mathbf{k}_j \in \mathbb{R}^{d_h}$ are query/key projections from
+$h = 4$ attention heads, and $b_{ij}^{\text{geom}}$ is an optional geometric bias.
+Weights are softmax-normalised over the $K$ neighbour axis:
+
+\begin{lstlisting}
+# yolino_gnn_head.py -- _GATLayer.forward()
+att = (q.unsqueeze(2) * k_neigh).sum(dim=-1) / math.sqrt(dh)  # [B,N,K,H]
+if geom_bias is not None:
+    att = att + geom_bias.unsqueeze(-1)
+att = att.masked_fill(~neigh_valid.unsqueeze(-1), float("-inf"))
+w = F.softmax(att_safe, dim=2)    # softmax over K neighbours
+msg = (w.unsqueeze(-1) * v_neigh).sum(dim=2).reshape(b, n, hd)
+x = x + self.resid_drop(self.proj_out(msg))
+x = x + self.ffn(self.norm2(x))
+\end{lstlisting}
+
+\subsubsection{Edge Classification and Sigmoid Threshold}
+
+An MLP edge head takes the concatenation $[\mathbf{h}_i, \mathbf{h}_j,
+\mathbf{f}_{ij}^{\text{geom}}]$ and outputs a scalar logit per candidate edge.
+After sigmoid, edges with probability $\geq 0.3$ (inference, \texttt{gnn\_overlay\_edge\_thresh})
+are retained:
+
+\begin{lstlisting}
+# exp83_gnn_ttpla_512512_from_exp80.yaml
+gnn_cc_edge_thresh: 0.2          # connected-component threshold (lowered from 0.3)
+gnn_overlay_edge_thresh: 0.3     # visualisation/inference threshold
+gnn_eval_edge_threshs: "0.2,0.35,0.5"
+\end{lstlisting}
+
+\subsubsection{90\% Masking and Top-384 Segment Matrix}
+
+To limit quadratic memory/computation in the edge matrix, only the top-384
+high-confidence segments are used as nodes. Edges between all $384 \times 384$
+pairs are \emph{not} computed: the \texttt{directional2} mode restricts each node
+to at most $K=8$ directional candidates, yielding a $384 \times 8$ sparse
+edge matrix. Approximately 90\% of potential pairs are masked via geometric
+hard-gating before attention:
+
+\begin{lstlisting}
+# segment_geom_soft_gate.py / yolino_gnn_head.py
+# Hard gate: lateral and along constraints
+gnn_use_hard_geom_gate: true
+gnn_max_lateral_px: 5.0
+gnn_max_lateral_sym: true
+gnn_max_along_px: 128.0
+gnn_max_end_gap_px: 40.0
+# Result: ~90% of N x N pairs excluded before GAT attention
+\end{lstlisting}
+
+%% ============================================================
+\section{Training}
+\label{sec:training}
+
+\subsection{Weight Initialisation}
+\label{subsec:init}
+
+All FPN lateral/smooth convolutions and the bottom-up path convolutions
+use \textbf{Kaiming (MSRA) normal initialisation} (fan-out mode):
+
+\begin{lstlisting}
+# yolino_net.py -- ConvNeXt_FPN_Backbone.__init__()
+for m in (self.lateral_c2, self.lateral_c3, self.lateral_c4,
+          self.smooth_p2, self.smooth_p3, self.smooth_p4):
+    nn.init.kaiming_normal_(m.weight,
+                            mode="fan_out",
+                            nonlinearity="relu")
+    if m.bias is not None:
+        nn.init.zeros_(m.bias)
+\end{lstlisting}
+
+The ConvNeXt-Tiny body itself retains ImageNet pretrained weights.
+
+\subsection{Learning Rate Scheduler}
+\label{subsec:scheduler}
+
+A \textbf{warm-up cosine annealing} schedule is used in Stage 2 (exp83):
+
+\[
+\eta(t) =
+\begin{cases}
+\dfrac{t+1}{T_{\text{warm}}} \cdot \eta_0 & t < T_{\text{warm}} \\[6pt]
+\eta_{\min} + \left(1 - \eta_{\min}/\eta_0\right)
+  \cdot \dfrac{1 + \cos\!\left(\pi\,\dfrac{t - T_{\text{warm}}}{T - T_{\text{warm}}}\right)}{2}
+& t \geq T_{\text{warm}}
+\end{cases}
+\]
+
+where $\eta_0$ is the initial learning rate, $T$ is total training steps,
+$T_{\text{warm}}$ is the number of warmup steps, and
+$\eta_{\min} = 0.1 \cdot \eta_0$.
+
+\begin{lstlisting}
+# optimizer_factory.py -- get_optimizer()
+def lr_lambda(step: int):
+    if scheduler == Scheduler.WARMUP_COSINE and step < warmup_steps:
+        return float(step + 1) / float(warmup_steps)
+    cosine_total = max(1, total_steps - warmup_steps)
+    cosine_step  = max(0, min(step - warmup_steps, cosine_total))
+    cos_factor = 0.5 * (1.0 + math.cos(
+                    math.pi * cosine_step / cosine_total))
+    return min_lr_ratio + (1.0 - min_lr_ratio) * cos_factor
+scheduler = torch.optim.lr_scheduler.LambdaLR(
+    optimizer, lr_lambda=lr_lambda)
+\end{lstlisting}
+
+\begin{table}[H]
+\centering
+\caption{Scheduler hyperparameters (exp83)}
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+Optimiser & Adam \\
+GNN learning rate (\texttt{lr\_e2e}) & $1 \times 10^{-4}$ \\
+Backbone/FPN/Geom LR & 0.0 (frozen) \\
+Scheduler & \texttt{warmup\_cosine} (step-level) \\
+Warmup epochs & 0 \\
+Min LR ratio & 0.1 \\
+Batch size & 16 \\
+Total epochs & 50 \\
+Early stopping patience & 25 epochs (earliest: 120) \\
+Gradient clip norm & 1.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Fine-Tuning Strategy}
+\label{subsec:finetuning}
+
+\textbf{Stage 1 (exp80)}: All layers (ConvNeXt body + FPN + geometry head) are
+trained end-to-end on TTPLA $512\times512$ from ImageNet pretrained weights.
+
+\begin{lstlisting}
+# exp80_ttpla_512512_scale16.yaml
+backbone_pretrained: True       # load ImageNet weights
+# No lr_backbone/lr_fpn overrides -> flat LR for all groups
+learning_rate: (default, ~1e-3)
+\end{lstlisting}
+
+\textbf{Stage 2 (exp83)}: The Stage 1 checkpoint is loaded as \texttt{explicit\_model}.
+Backbone, FPN, and geometry head are \emph{frozen} (learning rate = 0.0);
+only the GNN head is trained:
+
+\begin{lstlisting}
+# exp83_gnn_ttpla_512512_from_exp80.yaml
+explicit_model: "log/checkpoints/exp80_ttpla_512512_scale16/best_model.pth"
+lr_backbone: 0.0
+lr_fpn:      0.0
+lr_geom:     0.0
+lr_e2e:      0.0001    # GNN head only
+backbone_freeze_epochs: 10
+e2e_mode: gnn
+\end{lstlisting}
+
+\begin{lstlisting}
+# optimizer_factory.py -- maybe_freeze_backbone()
+def maybe_freeze_backbone(args, net, epoch):
+    n_freeze = int(getattr(args, "backbone_freeze_epochs", 0) or 0)
+    if n_freeze <= 0:
+        return False
+    should_freeze = epoch < n_freeze
+    for name, p in net.named_parameters():
+        if any(name.startswith(p) for p in _BACKBONE_BODY_PREFIXES):
+            p.requires_grad = not should_freeze
+\end{lstlisting}
+
+\subsection{Loss Functions}
+\label{subsec:loss}
+
+\subsubsection{Stage 1 --- Geometry + Confidence Loss}
+
+Stage 1 minimises a weighted combination of:
+\begin{itemize}
+  \item \textbf{Geometry loss} (\texttt{norm\_mean}): $L_2$ normalised MSE on
+        segment endpoint / mid-dir parameters.
+  \item \textbf{Confidence loss} (\texttt{mse\_mean}): MSE between predicted and
+        binary GT confidence (1 for matched cells, 0 for empty cells).
+\end{itemize}
+
+\[
+\mathcal{L}_{\text{Stage1}} = 2 \cdot \mathcal{L}_{\text{geom}} + 1 \cdot \mathcal{L}_{\text{conf}}
+\]
+
+Loss weight strategy is \texttt{fixed} with \texttt{weights: "2,1"}.
+Hard-matching bipartite assignment is used (\texttt{loss\_hard\_matching: true},
+\texttt{match\_by\_conf\_first: true}).
+
+\subsubsection{Stage 2 --- GNN Edge Loss}
+
+Stage 2 adds a \textbf{Binary Cross-Entropy} (BCE) edge classification loss
+with positive-class reweighting:
+
+\[
+\mathcal{L}_{\text{edge}} = -\frac{1}{|\mathcal{E}|}
+\sum_{(i,j)\in\mathcal{E}} \left[
+  w^+ y_{ij} \log \sigma(\hat{e}_{ij}) + (1 - y_{ij}) \log(1 - \sigma(\hat{e}_{ij}))
+\right]
+\]
+
+\begin{lstlisting}
+# exp83_gnn_ttpla_512512_from_exp80.yaml
+gnn_edge_loss_type: bce
+gnn_pos_weight: 4.0          # positive edge weight (2.0 in exp82 -> 4.0 in exp83)
+gnn_neg_per_pos: 6           # hard-negative ratio  (8 in exp82 -> 6 in exp83)
+gnn_neg_min_kept: 2
+gnn_loss_weight: 0.05        # combined GNN loss scale
+\end{lstlisting}
+
+An additional \textbf{random-walk topology loss} regularises global connectivity
+over $k=8$ steps (increased from 6 in exp82 to force longer-range chain connectivity):
+
+\[
+\mathcal{L}_{\text{RW}} = \text{BCE}\!\left(T^k_{ij},\;
+\mathbf{1}[\text{same instance}_{ij}]\right), \quad k=8 \text{ steps}
+\]
+
+\begin{lstlisting}
+# gnn_topology_loss.py
+# exp83: steps=8, rw_pos_weight=30.0, rw_topology_weight=0.35
+tk = transition
+for _ in range(steps - 1):      # T^k via matrix multiply
+    tk = torch.bmm(tk, transition)
+bce = F.binary_cross_entropy(pred, target, reduction="none")
+loss = (bce * weight)[valid_pair].sum() / weight[valid_pair].sum()
+\end{lstlisting}
+
+\begin{table}[H]
+\centering
+\caption{GNN edge loss hyperparameters: exp82 vs.\ exp83}
+\begin{tabular}{llll}
+\toprule
+Parameter & exp82 & \textbf{exp83} & Effect \\
+\midrule
+\texttt{gnn\_pos\_weight}          & 2.0 & \textbf{4.0}  & Stronger positive edge signal \\
+\texttt{gnn\_neg\_per\_pos}        & 8   & \textbf{6}    & Compensates higher pos weight \\
+\texttt{gnn\_degree\_row/col\_cap} & 2.0 & \textbf{4.0}  & Allows bridge edges \\
+\texttt{gnn\_rw\_topology\_weight} & 0.1 & \textbf{0.35} & Stronger topology regularisation \\
+\texttt{gnn\_rw\_steps}            & 6   & \textbf{8}    & Longer chain connectivity \\
+\texttt{gnn\_rw\_pos\_weight}      & 20.0& \textbf{30.0} & Same-instance pairs amplified \\
+\texttt{gnn\_rw\_start\_epoch}     & 3   & \textbf{2}    & RW loss starts 1 epoch earlier \\
+\texttt{gnn\_cc\_edge\_thresh}     & 0.3 & \textbf{0.2}  & More segments connected at CC \\
+\texttt{gnn\_overlay\_edge\_thresh}& 0.35& \textbf{0.3}  & Consistent with CC threshold \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%% ============================================================
+\section{Baseline and Ablation Studies}
+\label{sec:ablation}
+
+\subsection{Ablation Design}
+
+Three ablation steps progressively upgrade the system:
+
+\begin{table}[H]
+\centering
+\caption{Ablation experiment configurations (1024$\times$1024 TTPLA, unless noted)}
+\begin{tabular}{llllll}
+\toprule
+Exp & Config key & Backbone & Neck & Predictors & Head level \\
+\midrule
+exp09 & \texttt{exp09\_darknet\_1024} & Darknet-19 & None & 8 & P4 (stride 32) \\
+exp05 & \texttt{exp05\_convnext\_baseline\_1024} & ConvNeXt-Tiny & None & 8 & P4 \\
+exp10 & \texttt{exp10\_fpn\_bottomup\_p4\_1024} & ConvNeXt-Tiny & FPN+BU & 8 & P4 \\
+exp19 & \texttt{exp19\_fpn\_bottomup\_p4\_num\_predictors4\_1024} & ConvNeXt-Tiny & FPN+BU & 4 & P4 \\
+\textbf{exp80} & \texttt{exp80\_ttpla\_512512\_scale16} & ConvNeXt-Tiny & FPN+BU & 4 & P3 (stride 16) \\
+\textbf{exp83} & \texttt{exp83\_gnn\_ttpla\_512512\_from\_exp80} & (frozen) & (frozen) & 4 & P3 + GNN \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablation Results (validation F1)}
+
+Each ablation row was trained for 50 epochs on TTPLA at $1024 \times 1024$.
+The reported F1 is the \textbf{best validation F1} logged during training
+(cell-level matching metric from the YOLinO training loop, not LSNetv2 pixel F1).
+Values are taken from
+\texttt{ttpla\_train\_exp/analysis/metric\_histograms/best\_f1\_epoch\_metrics\_summary.csv}.
+
+\begin{table}[H]
+\centering
+\caption{Ablation study: progressive architecture upgrades (slide~18)}
+\begin{tabular}{clrrrr}
+\toprule
+Step & Experiment & Best epoch & F1 & Precision & Recall \\
+\midrule
+1 & exp09 (Darknet-19 baseline)           & 28 & 0.677 & 0.585 & 0.808 \\
+2 & exp05 (+ ConvNeXt-Tiny backbone)        & 36 & 0.748 & 0.637 & 0.911 \\
+3 & exp10 (+ top-down FPN + bottom-up)      & 29 & 0.784 & 0.689 & 0.915 \\
+4 & exp19 (+ reduce predictors $8 \to 4$) & 41 & 0.836 & 0.782 & 0.901 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+Reproduce by training each YAML under \texttt{configs/experiments/} and
+inspecting TensorBoard / the CSV above.
+The production Stage~1 model for $512^2$ inference is \textbf{exp80}
+(further fine-tuned from the exp19 family at P3 / scale~16).
+
+\subsection{Toggling via Config Files}
+
+Each ablation is a separate YAML; backbone, FPN, and predictor count are
+toggled via top-level keys:
+
+\begin{lstlisting}
+# exp09 (baseline): Darknet, no FPN
+backbone: darknet
+use_fpn: false
+num_predictors: 8
+head_level: P4
+
+# exp05: swap backbone only
+backbone: convnext
+use_fpn: false
+num_predictors: 8
+
+# exp10: add FPN + bottom-up
+backbone: convnext
+use_fpn: true
+use_bottom_up: true
+num_predictors: 8
+
+# exp19: reduce predictors 8->4
+backbone: convnext
+use_fpn: true
+use_bottom_up: true
+num_predictors: 4   # key change
+
+# exp80: move head to P3 (scale=16)
+scale: 16
+head_level: P3
+num_predictors: 4
+
+# exp83: Stage 2 GNN on top of exp80
+#  - backbone/fpn/geom frozen (lr=0.0)
+#  - GNN trained with strengthened topology loss
+e2e_mode: gnn
+explicit_model: "log/checkpoints/exp80_ttpla_512512_scale16/best_model.pth"
+lr_backbone: 0.0;  lr_fpn: 0.0;  lr_geom: 0.0
+lr_e2e: 0.0001
+gnn_rw_topology_weight: 0.35   # 0.1 in exp82
+gnn_cc_edge_thresh: 0.2        # 0.3 in exp82
+\end{lstlisting}
+
+At runtime, \texttt{YolinoNet} selects the backbone class
+(\texttt{ConvNeXt\_FPN\_Backbone} vs.\ \texttt{Darknet\_FPN\_Backbone})
+and configures the FPN and head level:
+
+\begin{lstlisting}
+# yolino_net.py -- YolinoNet.__init__()
+pretrained = bool(getattr(args, "backbone_pretrained", True))
+if args.backbone == "convnext":
+    self.backbone = ConvNeXt_FPN_Backbone(
+        out_channels=fpn_out,
+        pretrained=pretrained,
+        use_fpn=args.use_fpn,
+        use_bottom_up=args.use_bottom_up,
+    )
+elif args.backbone == "darknet":
+    self.backbone = Darknet_FPN_Backbone(
+        pretrained=pretrained,
+        use_fpn=args.use_fpn,
+        ...
+    )
+self.head_level = str(getattr(args, "head_level", "P3"))
+\end{lstlisting}
+
+%% ============================================================
+\section{Evaluation Metrics}
+\label{sec:metrics}
+
+\subsection{Pixel-Level Metrics (APR / ARR / F1 / F$_\beta$)}
+\label{subsec:pixel_metrics}
+
+\subsubsection{Rasterisation}
+
+Both GT polylines and predicted polylines/segments are rasterised to binary masks
+using \texttt{cv2.line} at a specified line width.
+The LSNetv2 protocol uses widths of \textbf{2 px} and \textbf{4 px}:
+
+\begin{lstlisting}
+# eval_pixel_f1/eval_pixel_f1.py
+LSNETV2_LINE_WIDTHS = (2, 4)   # px
+LSNETV2_BETA_SQ = 0.3          # beta^2 for F_beta
+
+def rasterize_polylines_mask(height, width, polylines, thickness):
+    return build_binary_mask(height, width, polylines, thickness)
+
+def rasterize_line_segments_mask(height, width, segments,
+                                  thickness):
+    mask = np.zeros((height, width), dtype=np.uint8)
+    for seg in segments:
+        (x1, y1), (x2, y2) = seg
+        cv2.line(mask,
+                 (int(round(x1)), int(round(y1))),
+                 (int(round(x2)), int(round(y2))),
+                 1,
+                 max(1, int(thickness)))
+    return mask
+\end{lstlisting}
+
+\subsubsection{Per-Image Precision / Recall}
+
+For each image, pixel-level true positives (TP), false positives (FP),
+and false negatives (FN) are computed from the binary mask intersection:
+
+\begin{lstlisting}
+# per-image computation
+tp = int((pred_mask & gt_mask).sum())
+fp = int((pred_mask & ~gt_mask).sum())
+fn = int((~pred_mask & gt_mask).sum())
+precision = tp / (tp + fp + 1e-8)
+recall    = tp / (tp + fn + 1e-8)
+f1        = 2*precision*recall / (precision + recall + 1e-8)
+\end{lstlisting}
+
+\subsubsection{Macro APR / ARR / F1 / F$_\beta$}
+
+Following the LSNetv2 protocol, \emph{macro} averages are reported
+(average over images, not global pixel count):
+
+\[
+\mathrm{APR} = \frac{1}{N}\sum_{i=1}^N P_i,\quad
+\mathrm{ARR} = \frac{1}{N}\sum_{i=1}^N R_i
+\]
+\[
+F_1 = \frac{2 \cdot \mathrm{APR} \cdot \mathrm{ARR}}
+           {\mathrm{APR} + \mathrm{ARR}},\quad
+F_\beta = \frac{(1+\beta^2)\,\mathrm{APR}\cdot\mathrm{ARR}}
+               {\beta^2\,\mathrm{APR} + \mathrm{ARR}}, \quad \beta^2 = 0.3
+\]
+
+\begin{lstlisting}
+# eval_pixel_f1.py
+def f_beta_score(precision, recall, beta_sq=LSNETV2_BETA_SQ):
+    return float((1.0 + beta_sq) * precision * recall
+                 / (beta_sq * precision + recall + 1e-8))
+
+def compute_lsnetv2_metrics(per_image):
+    apr = float(np.mean([m["precision"] for m in per_image]))
+    arr = float(np.mean([m["recall"]    for m in per_image]))
+    f1  = 2*apr*arr / (apr + arr + 1e-8)
+    return {"APR": apr, "ARR": arr,
+            "F1": float(f1), "F_beta": f_beta_score(apr, arr)}
+\end{lstlisting}
+
+\begin{table}[H]
+\centering
+\caption{Pixel F1 results on TTPLA test set (220 images, 2 px line width, GT-B)}
+\begin{tabular}{llrrrr}
+\toprule
+Model & Stage & APR & ARR & F1 & F$_\beta$ ($\beta^2{=}0.3$) \\
+\midrule
+exp80 & Geom only & 0.610 & 0.581 & 0.595 & 0.603 \\
+exp83 (ep6) & + GNN & 0.617 & 0.579 & 0.597 & 0.608 \\
+\midrule
+\multicolumn{2}{l}{LSNetv2 (reported, 512$\times$512)} & 0.714 & 0.560 & 0.628 & 0.671 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{ISQ: Instance Segmentation Quality}
+\label{subsec:isq}
+
+ISQ is a proposed segment-level metric that accounts for instance identity
+(polyline ID), over-splitting, and under-merging.
+All implementation is in \texttt{eval\_isq/isq\_core.py}.
+
+\subsubsection{Constants}
+
+\begin{lstlisting}
+# isq_core.py
+CELL_SIZE = 32
+MATCH_MAX_DIST_PX  = 24.0    # distance threshold
+MATCH_MAX_ANGLE_DEG = 15.0   # angle threshold
+MEANINGFUL_COVERAGE_THRESH = 0.3   # 30% overlap for UM/OS
+MIN_SEGMENTS_PER_PRED_POLYLINE = 2
+\end{lstlisting}
+
+\subsubsection{Step 1: GT Segment Generation}
+
+Each GT polyline is intersected with a $32 \times 32$ pixel grid.
+At most one segment per (cell, polyline) pair is generated:
+
+\begin{lstlisting}
+# isq_core.py -- polyline_to_cell_segments()
+for row in range(n_rows):
+    for col in range(n_cols):
+        seg = polyline_segment_in_cell(
+            polyline, row, col, cell_size=CELL_SIZE)
+        if seg is None:
+            continue
+        (x1, y1), (x2, y2) = seg
+        out.append(GtSegment(x1=x1, y1=y1, x2=x2, y2=y2,
+                             polyline_id=int(polyline_id),
+                             seg_idx=idx))
+        idx += 1
+\end{lstlisting}
+
+\subsubsection{Step 2: Predicted Segment to GT Matching}
+
+For each predicted segment, the closest GT segment is found subject to
+distance $< 24\,\text{px}$ \textbf{AND} angle difference $< 15°$:
+
+\[
+d(s_p, s_g) = \max\bigl(
+  d_\perp(A_p, s_g),\; d_\perp(B_p, s_g),\;
+  d_\perp(A_g, s_p),\; d_\perp(B_g, s_p)\bigr)
+\]
+
+\begin{lstlisting}
+# isq_core.py -- match_pred_segment_to_gt()
+for gt in candidates:
+    gt_seg = gt.as_endpoints()
+    dist  = segment_distance(pred_seg, gt_seg)
+    if dist >= MATCH_MAX_DIST_PX:        continue
+    angle = angle_diff_deg(segment_angle(pred_seg),
+                           segment_angle(gt_seg))
+    if angle >= MATCH_MAX_ANGLE_DEG:     continue
+    if dist < best_dist:
+        best_dist = dist;  best_idx = gt.seg_idx
+\end{lstlisting}
+
+A spatial bucket index (\texttt{build\_gt\_spatial\_index}) accelerates candidate
+retrieval from $O(N_{\text{gt}})$ to $O(1)$ per query.
+
+\subsubsection{Step 3: Dominant-ID and TP/FP/FN Computation}
+
+For each predicted polyline $p_i$ (with $\geq 2$ segments), the
+\emph{dominant GT polyline} is the most-frequently matched GT instance:
+
+\begin{lstlisting}
+# isq_core.py -- _dominant_gt_id_for_pred()
+ids = [m.matched_polyline_id
+       for m in matches
+       if m.pred_polyline_idx == pi
+       and m.matched_polyline_id is not None]
+dominant_id = Counter(ids).most_common(1)[0][0]
+\end{lstlisting}
+
+TP/FP/FN are computed ensuring \emph{each GT segment is counted as TP at most once}:
+
+\begin{lstlisting}
+# isq_core.py -- compute_isq_image()
+claimed_gt: set[int] = set()
+tp = fp = 0
+for m in matches:
+    dom = dominant_ids.get(m.pred_polyline_idx)
+    if dom is None or m.matched_polyline_id != dom \
+            or m.matched_gt_seg_idx is None:
+        fp += 1;  continue
+    if m.matched_gt_seg_idx in claimed_gt:
+        fp += 1;  continue      # GT already claimed
+    claimed_gt.add(m.matched_gt_seg_idx)
+    tp += 1
+fn = sum(1 for g in gt_segments
+         if g.seg_idx not in claimed_gt)
+\end{lstlisting}
+
+\subsubsection{Over-Split (OS) Rate}
+
+An over-split occurs when $\geq 2$ predicted polylines each have
+$\geq 30\%$ coverage of the same GT polyline:
+
+\begin{lstlisting}
+# isq_core.py -- _count_over_split_instances()
+for gid in gt_ids:
+    n_gt = len(gt_seg_by_id[gid])
+    meaningful_preds = 0
+    for pi in range(n_preds):
+        if _dominant_gt_id_for_pred(pi, matches) != gid:
+            continue
+        coverage = len(pred_to_gt_hits[(pi, gid)]) / n_gt
+        if coverage >= MEANINGFUL_COVERAGE_THRESH:  # 0.30
+            meaningful_preds += 1
+    if meaningful_preds >= 2:
+        n_over += 1
+\end{lstlisting}
+
+\subsubsection{Under-Merge (UM) Rate}
+
+An under-merge occurs when a single predicted polyline meaningfully
+covers $\geq 2$ distinct GT polylines:
+
+\begin{lstlisting}
+# isq_core.py -- compute_isq_image()
+for pi, poly in enumerate(pred_polylines):
+    n_pred = len(poly)
+    meaningful_gts = 0
+    for gid in gt_ids:
+        n_hit = len(pred_to_gt_hits.get((pi, gid), set()))
+        prec_pg = n_hit / n_pred
+        rec_pg  = n_hit / max(len(gt_seg_by_id[gid]), 1)
+        if prec_pg > 0.3 or rec_pg > 0.3:
+            meaningful_gts += 1
+    if meaningful_gts >= 2:
+        under_merge += 1
+\end{lstlisting}
+
+\subsubsection{ISQ Summary Aggregation}
+
+\begin{lstlisting}
+# isq_core.py -- summarize_isq()
+return {
+    "precision":   float(np.mean([m["precision"]    for m in per_image])),
+    "recall":      float(np.mean([m["recall"]       for m in per_image])),
+    "f1":          float(np.mean([m["f1"]           for m in per_image])),
+    "over_split":  float(np.mean([m["over_split_count"] for m in per_image])),
+    "under_merge": float(np.mean([m["under_merge"]  for m in per_image])),
+    "n_images":    len(per_image),
+    # Extended rates (added in eval_isq post-summary):
+    # os_rate = OS_total / n_gt_instances
+    # um_rate = UM_total / n_pred_polylines_total
+}
+\end{lstlisting}
+
+\subsubsection{OS and UM Rate Definitions}
+
+In addition to per-image means (\texttt{over\_split}, \texttt{under\_merge}),
+we report dataset-level rates used in the presentation (slide~23):
+
+\begin{align*}
+  \text{OS rate (\%)} &= 100 \times \frac{N_{\text{OS}}}{\sum_i n_{\text{gt\_instances}}^{(i)}} \\
+  \text{UM rate (\%)} &= 100 \times \frac{\sum_i \text{UM}^{(i)}}{\sum_i n_{\text{pred\_polylines}}^{(i)}}
+\end{align*}
+
+where $N_{\text{OS}}$ is the total over-split GT-instance count across all images,
+and $\text{UM}^{(i)}$ is the under-merge count for image~$i$
+(number of predicted polylines that meaningfully cover $\geq 2$ GT instances).
+The UM denominator uses \textbf{all} decoded predicted polylines
+(including GNN-internal candidates), not only polylines retained for ISQ matching.
+
+\begin{table}[H]
+\centering
+\caption{ISQ results --- full matrix (slide~23). TTPLA test unless noted.}
+\small
+\begin{tabular}{llrrrrrr}
+\toprule
+Resolution & Model & Exp & P & R & F1 & OS (\%) & UM (\%) \\
+\midrule
+512$^2$  & Geom & exp80 / ep0  & 0.354 & 0.663 & 0.455 & 0.76 & 26.7 \\
+512$^2$  & GAT  & exp83 / ep6   & 0.361 & 0.693 & 0.469 & 1.17 & 13.6 \\
+1024$^2$ & Geom & exp19          & 0.691 & 0.749 & 0.706 & 0.49 & 18.9 \\
+1024$^2$ & GAT  & exp76 / ep5    & 0.770 & 0.788 & 0.769 & 2.65 & 5.2 \\
+KEPCO val & Geom & exp23          & 0.436 & 0.320 & 0.336 & 0.40 & 37.6 \\
+KEPCO val & GAT  & exp71          & 0.625 & 0.382 & 0.445 & 1.61 & 5.2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+\textbf{Reproduction.}
+512$^2$ rows: \texttt{eval\_isq/results/isq\_results\_exp80\_exp83\_ep6\_512\_test.json}
+(220 TTPLA test images, \texttt{YOLinO\_benchmark}).
+1024$^2$ rows: \texttt{eval\_isq/results/isq\_results\_exp76\_ep5\_test.json}
+(440 TTPLA test images, \texttt{ttpla\_yolino\_dataset\_1024x1024}).
+KEPCO rows: \texttt{eval\_isq/results/isq\_results\_kepco\_fitlines.json}
+(36 validation frames; geom checkpoint \texttt{exp23\_finetune\_kepco}, GNN \texttt{exp71\_gnn\_kepco}).
+
+At $1024^2$, GAT improves ISQ F1 from 0.706 to 0.769 while reducing UM rate
+from 18.9\% to 5.2\% (slide~24 conclusion).
+At $512^2$, exp83 improves recall (+3.0\,pp) and F1 (+1.4\,pp) over exp80
+at the cost of a slightly higher OS rate (1.17\% vs.\ 0.76\%).
+
+\subsubsection{Motivating Examples (slide~22)}
+
+\paragraph{Line-width invariance.}
+Pixel F1 (LSNetv2 GT-B) is sensitive to rasterisation width, whereas ISQ
+operates on matched grid segments and is width-invariant.
+Representative test tile \texttt{58\_00191\_R} (exp76 geom, $1024^2$):
+
+\begin{table}[H]
+\centering
+\caption{Line-width sensitivity: pixel F1 vs.\ ISQ (stem \texttt{58\_00191\_R})}
+\begin{tabular}{lcc}
+\toprule
+Metric & @ 2\,px line width & @ 4\,px line width \\
+\midrule
+Pixel F1 (GT-B) & 0.315 & 0.524 \\
+ISQ F1          & \multicolumn{2}{c}{0.897 (identical)} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+Reproduce: \texttt{python eval\_pixel\_f1/viz\_isq\_motivation.py}
+(selects stems by scanning \texttt{isq\_results\_exp76\_ep5\_test.json}).
+
+\paragraph{Under-merge case study.}
+Tile \texttt{104\_495\_L} shows a merged geom prediction (UM\,=\,3) that
+achieves high pixel F1 but low ISQ F1; GAT separates instances (UM\,=\,0):
+
+\begin{table}[H]
+\centering
+\caption{Under-merge motivating example (stem \texttt{104\_495\_L}, 2\,px GT-B)}
+\begin{tabular}{lrrr}
+\toprule
+Post-processing & Pixel F1 & ISQ F1 & UM count \\
+\midrule
+Geom (exp19)    & 0.741 & 0.527 & 3 \\
+GAT (exp76 ep5) & 0.648 & 0.902 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{ISQ Validation Tests}
+
+Three validation modes are implemented in \texttt{eval\_isq/validate\_isq.py}:
+
+\begin{enumerate}
+  \item \textbf{Sanity test}: GT polylines used directly as predictions;
+        expected result: precision $= 1.0$, recall $= 1.0$, F1 $= 1.0$,
+        OS $= 0$, UM $= 0$.
+
+  \item \textbf{Controlled test}: Artificially generated under-merge
+        (concatenate two adjacent GT wires into one polyline) and
+        over-split (split a GT wire in half) predictions;
+        expected result: UM $> 0$ and OS $> 0$ respectively.
+
+  \item \textbf{Monotonicity test}: As predictions are progressively degraded
+        (random jitter, random drop), F1 should decrease monotonically.
+\end{enumerate}
+
+%% ============================================================
+\section{Inference, Postprocessing, and FPS Measurement}
+\label{sec:inference}
+
+\subsection{Stage 1 Postprocessing: BFS + Fit-Lines}
+\label{subsec:postproc}
+
+After the geometry head produces per-cell segments, they are assembled into polylines
+by the YOLinO rule-based pipeline (\texttt{fit\_lines}):
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Adjacency graph}: Segments within squared endpoint distance
+        $\leq 768 \,\text{px}^2$ (default) are connected by a directed edge.
+  \item \textbf{Connected components}: BFS over the adjacency graph groups
+        segments into wire candidates.
+  \item \textbf{Spline fitting} (optional): Cubic spline smoothing is applied
+        to each connected component.
+\end{enumerate}
+
+\begin{lstlisting}
+# isq_core.py -- _geom_segments_to_fitlines_cc()
+adjacency, reversed_adjacency = get_adjacency_list(
+    float(adjacency_threshold), endpoints, startpoints)
+roots = [node for node in adjacency.keys()
+         if not adjacency[node]]
+_, seg_id_groups = get_connected_components(
+    confidences, "isq_geom",
+    np.zeros((1,1,3), dtype=np.uint8),
+    int(min_segments_for_polyline),
+    _Args(), reversed_adjacency, roots,
+    list(segments), write_debug_images=False)
+\end{lstlisting}
+
+\subsection{Stage 2 Postprocessing: GNN Connected Components}
+\label{subsec:gnn_postproc}
+
+After GAT edge scoring, predicted polylines are recovered by
+\emph{union-find} over edges with probability $\geq$ \texttt{gnn\_cc\_edge\_thresh}:
+
+\begin{lstlisting}
+# isq_core.py -- gnn_segments_to_polylines()
+node_mid    = _to_numpy(gnn_single["node_mid_px"])
+node_valid  = _to_numpy(gnn_single["node_valid"])
+edge_scores = _to_numpy(gnn_single["edge_scores"])
+neighbors   = _to_numpy(gnn_single["neighbors"])
+# Union-Find grouping on thresholded edges
+# -> list of segment groups (polylines)
+\end{lstlisting}
+
+\subsection{FPS Measurement}
+\label{subsec:fps}
+
+FPS is measured in \texttt{src/yolino/tools/benchmark\_yolino\_fps.py}
+with three scopes:
+
+\begin{table}[H]
+\centering
+\caption{FPS benchmark scopes}
+\begin{tabular}{lp{9cm}}
+\toprule
+Scope & Description \\
+\midrule
+\texttt{geom\_only} & Backbone + FPN + geometry/embed heads only (no postprocessing). \\
+\texttt{geom\_post} & Above + activations + grid decode + \texttt{fit\_lines} (with spline). \\
+\texttt{geom\_post\_cc} & Forward + conf-filtered tensor decode + adjacency CC only (pre-spline). \\
+\texttt{geom\_gnn}  & Full forward including GNN head (\texttt{e2e\_mode=gnn}). \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+Presentation slide~19 maps YOLinO\,/\,YOLinO+Post\,/\,YOLinO+GAT to
+\texttt{geom\_only} / \texttt{geom\_post\_cc} / \texttt{geom\_gnn}
+respectively.
+The full \texttt{geom\_post} path (BFS + spline) is $\sim$1.2\,FPS at both
+resolutions and is \textbf{not} used in the slide FPS table.
+
+Timing methodology:
+\begin{enumerate}[leftmargin=*]
+  \item Images are preloaded to GPU memory before the timed loop.
+  \item 20 warmup iterations are discarded.
+  \item Wall-clock time via \texttt{time.perf\_counter()} with
+        \texttt{torch.cuda.synchronize()} before and after each forward pass.
+  \item Mean / median / throughput FPS are reported over $N$ images.
+\end{enumerate}
+
+\begin{lstlisting}
+# benchmark_yolino_fps.py -- _bench_forward()
+for i in range(warmup):          # warmup
+    fn(batches[i % len(batches)])
+_sync(device)                    # torch.cuda.synchronize()
+for images in batches:
+    _sync(device)
+    t0 = time.perf_counter()
+    fn(images)
+    _sync(device)
+    latencies.append(time.perf_counter() - t0)
+fps_mean = 1.0 / statistics.mean(latencies)
+\end{lstlisting}
+
+FPS measurements are performed at both $512 \times 512$ (benchmark dataset)
+and $1024 \times 1024$ (full TTPLA tiles) resolutions on a single GPU
+with batch size 1.
+
+\begin{table}[H]
+\centering
+\caption{Inference FPS comparison (slide~19). 100 val images, batch\,=\,1, CUDA-sync timing.}
+\begin{tabular}{lccc}
+\toprule
+Image size & YOLinO & YOLinO + Post & YOLinO + GAT \\
+\midrule
+512$^2$  & 131.3 & 54.1 & 44.7 \\
+1024$^2$ & 103.4 & 48.0 & 42.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+\textbf{Checkpoints and sources.}
+512$^2$: \texttt{Final\_comparison/ttpla\_fps\_512\_exp80\_exp83/fps\_summary\_audit.json}
+(exp80 geom / exp83 GNN; scopes \texttt{exp80\_geom\_only},
+\texttt{exp80\_geom\_post\_cc}, \texttt{exp83\_geom\_gnn}).
+1024$^2$ geom-only and GAT: \texttt{Final\_comparison/ttpla\_fps/fps\_summary.json}
+(exp19 ep42 geom; exp76 GNN best).
+1024$^2$ +Post: \texttt{geom\_post\_cc} scope on exp19
+(\texttt{benchmark\_yolino\_fps.py --scope geom\_post\_cc}); reproduced
+$\approx$51\,FPS on the evaluation GPU (2026-06-18); slide reports 48.0\,FPS.
+
+\begin{lstlisting}[language=bash, numbers=none]
+# 512^2 FPS (matches slide 19)
+cd CAPSTONE && CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src YOLINO_IGNORE_DIRTY=1 \
+  python src/yolino/tools/benchmark_yolino_fps.py \
+    --scope geom_only --config configs/experiments/exp80_ttpla_512512_scale16.yaml \
+    --checkpoint ttpla_train_exp/log/checkpoints/exp80_ttpla_512512_scale16/best_model.pth \
+    --dataset-root ../YOLinO_benchmark --split val --num-images 100 --gpu
+
+# Repeat with --scope geom_post_cc and exp83 config for +Post / +GAT rows.
+
+# 1024^2 FPS
+python src/yolino/tools/benchmark_yolino_fps.py \
+  --scope geom_post_cc \
+  --config configs/experiments/exp19_fpn_bottomup_p4_num_predictors4_1024.yaml \
+  --checkpoint ttpla_train_exp/log/checkpoints/exp19_fpn_bottomup_p4_num_predictors4_1024/ep0042_model.pth \
+  --dataset-root ../ttpla_yolino_dataset_1024x1024 --split val --num-images 100 --gpu
+\end{lstlisting}
+
+%% ============================================================
+\section{Experimental Environment}
+\label{sec:environment}
+
+\subsection{Software Stack}
+
+\begin{table}[H]
+\centering
+\caption{Software environment}
+\begin{tabular}{ll}
+\toprule
+Component & Version / Description \\
+\midrule
+Python & 3.10+ (project venv at \texttt{/home/work/caps\_drone/yolino/venv}) \\
+PyTorch & 2.x (CUDA 11.8+) \\
+torchvision & Compatible with PyTorch version above \\
+timm & Optional (for HRNet/ResNet backbone variants) \\
+NumPy & $\geq$ 1.23 \\
+OpenCV (\texttt{cv2}) & $\geq$ 4.6 \\
+Shapely & $\geq$ 2.0 (label geometry intersection) \\
+TensorBoard & Logging backend \\
+huggingface\_hub & Dataset / checkpoint download \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Hardware}
+
+\begin{table}[H]
+\centering
+\caption{Training and evaluation hardware}
+\begin{tabular}{ll}
+\toprule
+Component & Specification \\
+\midrule
+GPU (training) & 4 $\times$ NVIDIA GPU (DDP, \texttt{CUDA\_VISIBLE\_DEVICES=0,1,2,3}) \\
+GPU (evaluation) & Single GPU (\texttt{CUDA\_VISIBLE\_DEVICES=0}) \\
+Distributed training & PyTorch \texttt{torch.distributed.run} (DDP) \\
+Mixed precision & Disabled (\texttt{amp: false}) \\
+DataLoader workers & 0 (single-process, \texttt{loading\_workers: 0}) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Reproducibility}
+
+All experiments are launched via \texttt{run.sh}, which sets
+\texttt{DATASET\_TTPLA}, \texttt{PYTHONPATH}, and calls
+\texttt{torch.distributed.run}:
+
+\begin{lstlisting}[language=bash, numbers=none]
+# Stage 1 training
+export DATASET_TTPLA="$(pwd)/YOLinO_benchmark"
+bash run.sh \
+  --config configs/experiments/exp80_ttpla_512512_scale16.yaml \
+  --dataset-root "$DATASET_TTPLA" \
+  --nproc 4
+
+# Stage 2 training (requires Stage 1 checkpoint)
+bash run.sh \
+  --config configs/experiments/exp83_gnn_ttpla_512512_from_exp80.yaml \
+  --dataset-root "$DATASET_TTPLA" \
+  --nproc 3
+\end{lstlisting}
+
+Checkpoints are written to:
+\begin{lstlisting}[language=bash, numbers=none]
+ttpla_train_exp/log/checkpoints/<run_name>/best_model.pth
+ttpla_train_exp/log/checkpoints/<run_name>/ep<NNNN>_model.pth
+\end{lstlisting}
+
+All report checkpoints are published on Hugging Face
+(\texttt{V8heart/CAPSTONE-gnn-weights}).
+The \textbf{final Stage~2 model} is \texttt{exp83}, epoch~6
+(\texttt{ep0006\_model.pth}); \texttt{exp81/ep0058} is retained as a reference only.
+
+\begin{table}[H]
+\centering
+\caption{Published checkpoints on Hugging Face (\texttt{CAPSTONE-gnn-weights})}
+\begin{tabular}{lll}
+\toprule
+Experiment & Checkpoint file & Role \\
+\midrule
+\texttt{exp80\_ttpla\_512512\_scale16} & \texttt{best\_model.pth} & Stage~1 geom (512$^2$) \\
+\texttt{exp83\_gnn\_ttpla\_512512\_from\_exp80} & \texttt{ep0006\_model.pth} & \textbf{Stage~2 GNN (final)} \\
+\texttt{exp81\_gnn\_ttpla\_512512\_from\_exp80} & \texttt{ep0058\_model.pth} & Previous Stage~2 \\
+\texttt{exp19\_fpn\_bottomup\_p4\_num\_predictors4\_1024} & \texttt{ep0042\_model.pth} & 1024$^2$ ablation geom \\
+\texttt{exp76\_gnn\_ttpla\_full} & \texttt{ep0005\_model.pth} & 1024$^2$ ablation GNN \\
+\texttt{exp23\_finetune\_kepco} & \texttt{best\_model.pth} & KEPCO geom fine-tune \\
+\texttt{exp71\_gnn\_kepco} & \texttt{best\_model.pth} & KEPCO GNN \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{lstlisting}[language=bash, numbers=none]
+# Stage 2 final model (exp83, epoch 6)
+hf download V8heart/CAPSTONE-gnn-weights \
+  exp83_gnn_ttpla_512512_from_exp80/ep0006_model.pth \
+  --repo-type model \
+  --local-dir ttpla_train_exp/log/checkpoints/exp83_gnn_ttpla_512512_from_exp80
+
+# 1024^2 ablation geom + GNN
+hf download V8heart/CAPSTONE-gnn-weights \
+  exp19_fpn_bottomup_p4_num_predictors4_1024/ep0042_model.pth \
+  --repo-type model \
+  --local-dir ttpla_train_exp/log/checkpoints/exp19_fpn_bottomup_p4_num_predictors4_1024
+hf download V8heart/CAPSTONE-gnn-weights \
+  exp76_gnn_ttpla_full/ep0005_model.pth \
+  --repo-type model \
+  --local-dir ttpla_train_exp/log/checkpoints/exp76_gnn_ttpla_full
+
+# KEPCO cross-domain
+hf download V8heart/CAPSTONE-gnn-weights \
+  exp23_finetune_kepco/best_model.pth \
+  --repo-type model \
+  --local-dir ttpla_train_exp/log/checkpoints/exp23_finetune_kepco
+hf download V8heart/CAPSTONE-gnn-weights \
+  exp71_gnn_kepco/best_model.pth \
+  --repo-type model \
+  --local-dir ttpla_train_exp/log/checkpoints/exp71_gnn_kepco
+\end{lstlisting}
+
+Published datasets:
+\begin{itemize}[leftmargin=*]
+  \item \texttt{V8heart/yolino-ttpla-benchmark} --- 512$^2$ main benchmark
+  \item \texttt{V8heart/ttpla-yolino-1024} --- 1024$^2$ ablation / ISQ test tiles
+  \item \texttt{V8heart/Yolino-KEPCO} --- KEPCO cross-domain evaluation set
+\end{itemize}
+
+%% ============================================================
+\section*{References}
+\addcontentsline{toc}{section}{References}
+
+\begin{thebibliography}{9}
+
+\bibitem{meyer2021yolino}
+A.\ Meyer, P.\ Skudlik, J.-H.\ Pauls, and C.\ Stiller,
+``YOLinO: Generic Single Shot Polyline Detection in Real Time,''
+\textit{Proc.\ IEEE/CVF ICCV Workshops}, pp.\ 2916--2925, 2021.
+
+\bibitem{velickovic2018gat}
+P.\ Veli\v{c}kovi\'{c}, G.\ Cucurull, A.\ Casanova, A.\ Romero,
+P.\ Li\`{o}, and Y.\ Bengio,
+``Graph Attention Networks,''
+\textit{ICLR}, 2018.
+
+\bibitem{liu2022convnext}
+Z.\ Liu, H.\ Mao, C.-Y.\ Wu, C.\ Feichtenhofer, T.\ Darrell, and S.\ Xie,
+``A ConvNet for the 2020s,''
+\textit{Proc.\ IEEE/CVF CVPR}, pp.\ 11976--11986, 2022.
+
+\bibitem{lin2017fpn}
+T.-Y.\ Lin, P.\ Doll\'{a}r, R.\ Girshick, K.\ He, B.\ Hariharan, and S.\ Belongie,
+``Feature Pyramid Networks for Object Detection,''
+\textit{Proc.\ IEEE/CVF CVPR}, pp.\ 2117--2125, 2017.
+
+\bibitem{liu2018panet}
+S.\ Liu, L.\ Qi, H.\ Qin, J.\ Shi, and J.\ Jia,
+``Path Aggregation Network for Instance Segmentation,''
+\textit{Proc.\ IEEE/CVF CVPR}, pp.\ 8759--8768, 2018.
+
+\bibitem{he2015msra}
+K.\ He, X.\ Zhang, S.\ Ren, and J.\ Sun,
+``Delving Deep into Rectifiers: Surpassing Human-Level Performance on ImageNet Classification,''
+\textit{Proc.\ IEEE ICCV}, pp.\ 1026--1034, 2015.
+
+\bibitem{ttpla}
+Q.\ Wang and J.\ Zhang,
+``TTPLA: An Aerial-Image Dataset for Detection and Segmentation of Transmission Towers and Power Lines,''
+\textit{Proc.\ ACM MM}, 2020.
+
+\bibitem{lsnetv2}
+X.\ Li \textit{et al.},
+``LSNetv2: Powerline Detection via Feature Line Segments,''
+2023.
+
+\end{thebibliography}
+
+\end{document}

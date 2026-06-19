@@ -25,16 +25,16 @@ CAPSTONE detects aerial powerlines in TTPLA imagery using a **two-stage** pipeli
 
 **Pipeline**
 - **Stage 1 (`exp80`)** — train YOLinO geometry + confidence (ConvNeXt-Tiny, FPN+PANet, 512×512, scale 16 / P3).
-- **Stage 2 (`exp83`)** — freeze backbone/FPN/geom head; train GNN head with strengthened topology loss (`directional2`, BCE + random-walk).
+- **Stage 2 (`exp83`)** — freeze backbone/FPN/geom head; train GNN head with strengthened topology loss (`directional2`, BCE + random-walk). **Best checkpoint: epoch 6.**
 
-Large artifacts (dataset & checkpoints) are hosted on [Hugging Face](https://huggingface.co/V8heart); this repo contains code and experiment configs only.
+Large artifacts (datasets & checkpoints) are hosted on [Hugging Face](https://huggingface.co/V8heart); this repo contains code and experiment configs only.
 
 ## Results
 
 | Stage | Config | Description |
 |-------|--------|-------------|
 | **Stage 1** | `exp80` | YOLinO geom + confidence (conf ≥ 0.7) |
-| **Stage 2** | `exp83` | GNN assembly on top of exp80 |
+| **Stage 2** | `exp83` | GNN assembly on top of exp80 (ep6) |
 
 **Quantitative results (TTPLA test set, 220 images)**
 
@@ -85,8 +85,8 @@ export PYTHON_BIN=/path/to/venv/bin/python
 ## Quick start
 
 ```bash
-git clone https://github.com/viewlab-group/Capstone26s-PowerLineDetection-dev.git
-cd Capstone26s-PowerLineDetection-dev
+git clone https://github.com/V8heart/CAPSTONE.git
+cd CAPSTONE
 source /path/to/venv/bin/activate   # or set PYTHON_BIN
 pip install -e .
 pip install -U huggingface_hub
@@ -98,7 +98,7 @@ hf download V8heart/yolino-ttpla-benchmark \
 
 export DATASET_TTPLA="$(pwd)/YOLinO_benchmark"
 
-# optional: download Stage 2 checkpoint for inference
+# download Stage 2 checkpoint (exp83, epoch 6 — final model)
 hf download V8heart/CAPSTONE-gnn-weights \
   exp83_gnn_ttpla_512512_from_exp80/ep0006_model.pth \
   --repo-type model \
@@ -113,10 +113,35 @@ YOLinO_benchmark/
 └── labels/{train,val,test}/*.npy
 ```
 
-| Resource | Hugging Face | Status |
-|----------|--------------|--------|
-| TTPLA benchmark (512×512) | [V8heart/yolino-ttpla-benchmark](https://huggingface.co/datasets/V8heart/yolino-ttpla-benchmark) | Available |
-| Stage 2 checkpoint (`exp83`, ep6) | [V8heart/CAPSTONE-gnn-weights](https://huggingface.co/V8heart/CAPSTONE-gnn-weights) | Available |
+### Hugging Face resources
+
+| Resource | Hugging Face | Notes |
+|----------|--------------|-------|
+| TTPLA benchmark (512×512) | [V8heart/yolino-ttpla-benchmark](https://huggingface.co/datasets/V8heart/yolino-ttpla-benchmark) | Main training / test set |
+| TTPLA ablation tiles (1024×1024) | [V8heart/ttpla-yolino-1024](https://huggingface.co/datasets/V8heart/ttpla-yolino-1024) | 1024² ablation & ISQ full-test eval |
+| KEPCO cross-domain dataset | [V8heart/Yolino-KEPCO](https://huggingface.co/datasets/V8heart/Yolino-KEPCO) | exp23 / exp71 evaluation |
+| Model weights | [V8heart/CAPSTONE-gnn-weights](https://huggingface.co/V8heart/CAPSTONE-gnn-weights) | See checkpoint table below |
+
+**Published checkpoints** (`V8heart/CAPSTONE-gnn-weights`):
+
+| Experiment | File | Role |
+|------------|------|------|
+| `exp80_ttpla_512512_scale16` | `best_model.pth` | Stage 1 geom (512²) |
+| `exp83_gnn_ttpla_512512_from_exp80` | `ep0006_model.pth` | **Stage 2 GNN (512², final)** |
+| `exp81_gnn_ttpla_512512_from_exp80` | `ep0058_model.pth` | Previous Stage 2 (reference) |
+| `exp19_fpn_bottomup_p4_num_predictors4_1024` | `ep0042_model.pth` | 1024² ablation geom |
+| `exp76_gnn_ttpla_full` | `ep0005_model.pth` | 1024² ablation GNN |
+| `exp23_finetune_kepco` | `best_model.pth` | KEPCO geom fine-tune |
+| `exp71_gnn_kepco` | `best_model.pth` | KEPCO GNN |
+
+Download any checkpoint:
+
+```bash
+hf download V8heart/CAPSTONE-gnn-weights \
+  <run_name>/<filename>.pth \
+  --repo-type model \
+  --local-dir ttpla_train_exp/log/checkpoints/<run_name>
+```
 
 ---
 
@@ -166,6 +191,8 @@ bash run.sh \
   --dataset-root "$DATASET_TTPLA" \
   --nproc 3
 ```
+
+> Previous Stage 2 experiments: `exp81` (directional2_ctx), `exp82` (directional2 baseline).
 
 ---
 
@@ -240,7 +267,7 @@ ISQ is a **proposed segment-level metric** that explicitly accounts for instance
 - **Over-split (OS):** ≥ 2 predicted polylines each cover ≥ 30% of the same GT polyline.
 - **Under-merge (UM):** a single predicted polyline meaningfully covers ≥ 2 distinct GT polylines (precision or recall ≥ 30% against each).
 
-**Usage:**
+**Usage (512² main results):**
 
 ```bash
 cd eval_isq
@@ -252,6 +279,19 @@ python eval_isq.py \
   --gnn-config  ../configs/experiments/exp83_gnn_ttpla_512512_from_exp80.yaml \
   --geom-ckpt   ../ttpla_train_exp/log/checkpoints/exp80_ttpla_512512_scale16/best_model.pth \
   --gnn-ckpt    ../ttpla_train_exp/log/checkpoints/exp83_gnn_ttpla_512512_from_exp80/ep0006_model.pth \
+  --dataset-root "$DATASET_TTPLA" \
+  --split test --gpu
+```
+
+**Usage (1024² ablation):**
+
+```bash
+python eval_isq.py \
+  --geom-config ../configs/experiments/exp19_fpn_bottomup_p4_num_predictors4_1024.yaml \
+  --gnn-config  ../configs/experiments/exp76_gnn_ttpla_full.yaml \
+  --geom-ckpt   ../ttpla_train_exp/log/checkpoints/exp19_fpn_bottomup_p4_num_predictors4_1024/ep0042_model.pth \
+  --gnn-ckpt    ../ttpla_train_exp/log/checkpoints/exp76_gnn_ttpla_full/ep0005_model.pth \
+  --dataset-root /path/to/ttpla_yolino_dataset_1024x1024 \
   --split test --gpu
 ```
 
@@ -289,7 +329,31 @@ python eval_pixel_f1.py \
   --gnn-config  ../configs/experiments/exp83_gnn_ttpla_512512_from_exp80.yaml \
   --geom-ckpt   ../ttpla_train_exp/log/checkpoints/exp80_ttpla_512512_scale16/best_model.pth \
   --gnn-ckpt    ../ttpla_train_exp/log/checkpoints/exp83_gnn_ttpla_512512_from_exp80/ep0006_model.pth \
+  --dataset-root "$DATASET_TTPLA" \
   --split test --gpu
+```
+
+---
+
+## Dataset preprocessing scripts
+
+1024×1024 TTPLA tiles and the KEPCO dataset are built with helper scripts under `scripts/`:
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/build_downsampled_yolino_dataset.py` | Core resize / label scaling utilities used by the tiling pipeline |
+| `scripts/build_ttpla_style_dataset.py` | CVAT XML or LabelMe → YOLinO `{images,labels}/{train,val,test}` layout |
+| `scripts/prepare_kepco_yolino.py` | KEPCO CVAT → dual-crop 1024² YOLinO dataset |
+
+Example (1024² TTPLA tiles from CVAT):
+
+```bash
+python scripts/build_ttpla_style_dataset.py cvat-xml \
+  --cvat-xml /path/to/annotations.xml \
+  --image-dir /path/to/images \
+  --guide-dir data_guide \
+  --output-root ttpla_yolino_dataset_1024x1024 \
+  --target-width 1024
 ```
 
 ---
@@ -301,20 +365,22 @@ CAPSTONE/
 ├── run.sh                              # main training launcher (DDP)
 ├── configs/experiments/
 │   ├── exp80_ttpla_512512_scale16.yaml           # Stage 1 (geom)
-│   ├── exp83_gnn_ttpla_512512_from_exp80.yaml    # Stage 2 (GNN, used)
-│   └── exp82_gnn_ttpla_512512_from_exp80.yaml    # Stage 2 (prev.)
+│   ├── exp83_gnn_ttpla_512512_from_exp80.yaml    # Stage 2 (GNN, final — ep6)
+│   ├── exp82_gnn_ttpla_512512_from_exp80.yaml    # Stage 2 (prev.)
+│   └── exp19_fpn_bottomup_p4_num_predictors4_1024.yaml  # 1024² ablation
+├── scripts/
+│   ├── build_downsampled_yolino_dataset.py       # tiling / resize utilities
+│   ├── build_ttpla_style_dataset.py              # TTPLA / CVAT dataset builder
+│   └── prepare_kepco_yolino.py                   # KEPCO dataset builder
 ├── src/yolino/
 │   ├── train.py                        # training entry
 │   ├── predict.py                      # inference + visualisation
 │   ├── eval.py                         # built-in evaluation
 │   ├── dataset/ttpla.py                # TTPLA dataset loader
-│   ├── dataset/augmentation.py         # data augmentation pipeline
-│   ├── model/yolino_net.py             # ConvNeXt + FPN + geom head
 │   ├── model/yolino_gnn_head.py        # GAT-based GNN head
-│   ├── model/optimizer_factory.py      # LR groups + cosine scheduler
-│   └── model/gnn_topology_loss.py      # random-walk topology loss
+│   └── tools/benchmark_yolino_fps.py   # FPS benchmark
 ├── eval_isq/
-│   ├── isq_core.py                     # ISQ metric (matching, TP/FP/FN, OS/UM)
+│   ├── isq_core.py                     # ISQ metric
 │   └── eval_isq.py                     # ISQ evaluation runner
 ├── eval_pixel_f1/
 │   └── eval_pixel_f1.py                # Pixel F1 / LSNetv2-style metrics
