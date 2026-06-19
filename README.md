@@ -13,8 +13,6 @@
 
 - [**Seokju Lee**](https://github.com/SeokjuLee) — slee@kentech.ac.kr
 
-*Capstone project — [viewlab-group/Capstone26s-PowerLineDetection-dev](https://github.com/viewlab-group/Capstone26s-PowerLineDetection-dev)*
-
 ## Abstract
 
 CAPSTONE detects aerial powerlines in TTPLA imagery using a **two-stage** pipeline. **Stage 1** runs a YOLinO-style single-shot detector (ConvNeXt-Tiny + FPN) to predict per-cell line geometry and confidence. **Stage 2** freezes that backbone and trains a **Graph Attention Network (GAT)** on predicted segments to assemble individual wires into instance-level polylines. Datasets and checkpoints are published on Hugging Face; this repository provides training, inference, experiment configs, and evaluation code.
@@ -383,7 +381,7 @@ CAPSTONE/
 │   ├── isq_core.py                     # ISQ metric
 │   └── eval_isq.py                     # ISQ evaluation runner
 ├── eval_pixel_f1/
-│   └── eval_pixel_f1.py                # Pixel F1 / LSNetv2-style metrics
+│   └── eval_pixel_f1.py                  # Pixel F1 / LSNetv2-style metrics
 └── ttpla_train_exp/
     └── log/checkpoints/                # saved weights (gitignored)
 ```
