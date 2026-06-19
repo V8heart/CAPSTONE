@@ -1,0 +1,24 @@
+{
+  "settings": {
+    "postprocess": "yolino_fit_lines_cc_only",
+    "adjacency_threshold": 768.0,
+    "min_segments_for_polyline": 5,
+    "pickle": "/home/work/caps_drone/eval_isq/pred_geom_exp80_512_test.pkl",
+    "geom_checkpoint": "/home/work/caps_drone/yolino/CAPSTONE/ttpla_train_exp/log/checkpoints/exp80_ttpla_512512_scale16/best_model.pth"
+  },
+  "summary": {
+    "correctness": 0.642633115251476,
+    "completeness": 0.41698707215757624,
+    "quality": 0.45924615303966176,
+    "relaxed_precision": 0.642633115251476,
+    "relaxed_recall": 0.41698707215757624,
+    "relaxed_f1": 0.45924615303966176,
+    "relaxed_f_beta": 0.5178245716314174,
+    "precision": 0.46080929964754663,
+    "recall": 0.29217736955042545,
+    "f1": 0.3127125609023615,
+    "f_beta": 0.35678717200235754,
+    "iou": 0.2016599225095904,
+    "n_images": 220
+  }
+}

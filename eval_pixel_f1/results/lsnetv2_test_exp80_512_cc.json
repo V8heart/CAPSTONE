@@ -1,0 +1,16 @@
+{
+  "settings": {
+    "postprocess": "yolino_fit_lines_cc_only",
+    "adjacency_threshold": 768.0,
+    "min_segments_for_polyline": 5,
+    "pickle": "/home/work/caps_drone/eval_isq/pred_geom_exp80_512_test.pkl",
+    "geom_checkpoint": "/home/work/caps_drone/yolino/CAPSTONE/ttpla_train_exp/log/checkpoints/exp80_ttpla_512512_scale16/best_model.pth"
+  },
+  "summary": {
+    "APR": 0.4897309443767641,
+    "ARR": 0.3378403545312863,
+    "F1": 0.39984681463037647,
+    "F_beta": 0.4436964578046327,
+    "n_images": 220
+  }
+}

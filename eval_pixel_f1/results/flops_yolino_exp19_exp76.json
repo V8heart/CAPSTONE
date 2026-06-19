@@ -1,0 +1,50 @@
+{
+  "input_shape": [
+    1,
+    3,
+    1024,
+    1024
+  ],
+  "convention": {
+    "thop_output": "MACs",
+    "reported_flops": "2 * MACs (multiply + add counted separately)",
+    "lsnetv2_reference_gflops": 130.8,
+    "lsnetv2_reference_note": "LSNetv2 paper TTPLA @ 512x512, RTX 3090; not directly comparable resolution"
+  },
+  "geom_exp19": {
+    "config": "/home/work/caps_drone/yolino/CAPSTONE/configs/experiments/exp19_fpn_bottomup_p4_num_predictors4_1024.yaml",
+    "checkpoint": "/home/work/caps_drone/yolino/CAPSTONE/ttpla_train_exp/log/checkpoints/exp19_fpn_bottomup_p4_num_predictors4_1024/best_model.pth",
+    "scope": "ConvNeXt+FPN+bottom-up+geom/embed heads (no GNN)",
+    "macs": 112900964352.0,
+    "gflops_macs": 112.900964352,
+    "flops": 225801928704.0,
+    "gflops": 225.801928704
+  },
+  "gnn_exp76_head_only": {
+    "config": "/home/work/caps_drone/yolino/CAPSTONE/configs/experiments/exp76_gnn_ttpla_full.yaml",
+    "checkpoint": "/home/work/caps_drone/yolino/CAPSTONE/ttpla_train_exp/log/checkpoints/exp76_gnn_ttpla_full/ep0005_model.pth",
+    "scope": "YolinoGnnSegmentGraphHead only (inputs from one real 1024 val image)",
+    "gnn_max_nodes": 384,
+    "representative_active_nodes": 421,
+    "representative_nodes_after_cap": 384,
+    "node_conf_thresh": 0.1,
+    "adjacency_mode": "directional2",
+    "macs": 2090205184.0,
+    "gflops_macs": 2.090205184,
+    "flops": 4180410368.0,
+    "gflops": 4.180410368
+  },
+  "full_pipeline_exp76": {
+    "config": "/home/work/caps_drone/yolino/CAPSTONE/configs/experiments/exp76_gnn_ttpla_full.yaml",
+    "checkpoint": "/home/work/caps_drone/yolino/CAPSTONE/ttpla_train_exp/log/checkpoints/exp76_gnn_ttpla_full/ep0005_model.pth",
+    "scope": "Geometry + GAT head (full YolinoNet.forward incl. e2e)",
+    "macs": 114991169536.0,
+    "gflops_macs": 114.991169536,
+    "flops": 229982339072.0,
+    "gflops": 229.982339072
+  },
+  "sum_geom_plus_gnn_macs": 114991169536.0,
+  "sum_geom_plus_gnn_gflops_macs": 114.991169536,
+  "sum_geom_plus_gnn_flops": 229982339072.0,
+  "sum_geom_plus_gnn_gflops": 229.982339072
+}

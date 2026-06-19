@@ -1,0 +1,124 @@
+{
+  "settings": {
+    "geom_checkpoint": "/home/work/caps_drone/yolino/CAPSTONE/ttpla_train_exp/log/checkpoints/exp80_ttpla_512512_scale16/best_model.pth",
+    "dataset_root": "/home/work/caps_drone/yolino/YOLinO_benchmark",
+    "split": "test",
+    "n_images": 220,
+    "raw_pickle": "/home/work/caps_drone/eval_isq/pred_geom_raw_exp80_512_test.pkl",
+    "cc192_pickle": "/home/work/caps_drone/eval_isq/pred_geom_exp80_512_test_adj192.pkl",
+    "avg_raw_segments_per_image": 181.24545454545455,
+    "postprocess_cc": {
+      "method": "yolino_fit_lines_connected_components",
+      "min_segments_for_polyline": 5,
+      "smoothing": false,
+      "spline": false
+    }
+  },
+  "no_post": {
+    "description": "exp80 raw geom segments (no CC)",
+    "avg_segments_per_image": 181.24545454545455,
+    "lsnetv2": {
+      "APR": 0.6095650640838013,
+      "ARR": 0.5811953882037522,
+      "F1": 0.5950422696686358,
+      "F_beta": 0.6027751239019304,
+      "n_images": 220
+    },
+    "plgan": {
+      "correctness": 0.7750180701445815,
+      "completeness": 0.8291776086353124,
+      "quality": 0.7871267273806818,
+      "relaxed_precision": 0.7750180701445815,
+      "relaxed_recall": 0.8291776086353124,
+      "relaxed_f1": 0.7871267273806818,
+      "relaxed_f_beta": 0.7772680676324147,
+      "precision": 0.5561110096749807,
+      "recall": 0.5114808906717303,
+      "f1": 0.5042370252065161,
+      "f_beta": 0.5223932178501941,
+      "iou": 0.34958100378525386,
+      "n_images": 220
+    }
+  },
+  "fit_lines_cc_adj768": {
+    "description": "CC with adjacency_threshold=768 (scale=32 default, wrong for scale=16)",
+    "adjacency_threshold": 768.0,
+    "avg_polylines_per_image": 2.881818181818182,
+    "avg_chained_segments_per_image": 135.77727272727273,
+    "lsnetv2": {
+      "APR": 0.4897236456373531,
+      "ARR": 0.3378319443447955,
+      "F1": 0.39983849157895246,
+      "F_beta": 0.4436885016853128,
+      "n_images": 220
+    },
+    "plgan": {
+      "correctness": 0.6426231541370493,
+      "completeness": 0.4169790263251452,
+      "quality": 0.4592170966400683,
+      "relaxed_precision": 0.6426231541370493,
+      "relaxed_recall": 0.4169790263251452,
+      "relaxed_f1": 0.4592170966400683,
+      "relaxed_f_beta": 0.5177976852931667,
+      "precision": 0.4607837876760755,
+      "recall": 0.2921385328204764,
+      "f1": 0.3126591125336699,
+      "f_beta": 0.3567427060634495,
+      "iou": 0.20162174069144162,
+      "n_images": 220
+    }
+  },
+  "fit_lines_cc_adj192": {
+    "description": "CC with adjacency_threshold=192 (0.75*16^2, correct for scale=16)",
+    "adjacency_threshold": 192.0,
+    "avg_polylines_per_image": 6.0,
+    "avg_chained_segments_per_image": 300.33181818181816,
+    "lsnetv2": {
+      "APR": 0.5241238763542242,
+      "ARR": 0.6653600668852577,
+      "F1": 0.5863569600539138,
+      "F_beta": 0.5511207729924601,
+      "n_images": 220
+    },
+    "plgan": {
+      "correctness": 0.7222634368848173,
+      "completeness": 0.8265041089293941,
+      "quality": 0.7518874725468472,
+      "relaxed_precision": 0.7222634368848173,
+      "relaxed_recall": 0.8265041089293941,
+      "relaxed_f1": 0.7518874725468472,
+      "relaxed_f_beta": 0.7311495515020514,
+      "precision": 0.48707949733256145,
+      "recall": 0.5899506792210036,
+      "f1": 0.49610446055393836,
+      "f_beta": 0.48255735641601455,
+      "iou": 0.3446205864084012,
+      "n_images": 220
+    }
+  },
+  "fit_lines_cc": {
+    "adjacency_threshold": 768.0,
+    "lsnetv2": {
+      "APR": 0.4897236456373531,
+      "ARR": 0.3378319443447955,
+      "F1": 0.39983849157895246,
+      "F_beta": 0.4436885016853128,
+      "n_images": 220
+    },
+    "plgan": {
+      "correctness": 0.6426231541370493,
+      "completeness": 0.4169790263251452,
+      "quality": 0.4592170966400683,
+      "relaxed_precision": 0.6426231541370493,
+      "relaxed_recall": 0.4169790263251452,
+      "relaxed_f1": 0.4592170966400683,
+      "relaxed_f_beta": 0.5177976852931667,
+      "precision": 0.4607837876760755,
+      "recall": 0.2921385328204764,
+      "f1": 0.3126591125336699,
+      "f_beta": 0.3567427060634495,
+      "iou": 0.20162174069144162,
+      "n_images": 220
+    }
+  }
+}
