@@ -250,6 +250,7 @@ src/yolino/tools/visualize_*
 src/yolino/tools/compare_*
 src/yolino/tools/comparison_*
 src/yolino/tools/benchmark_*
+!src/yolino/tools/benchmark_yolino_fps.py
 src/yolino/tools/*_viz.py
 src/yolino/tools/val_*_overlay.py
 src/yolino/tools/val_raw_*
